@@ -247,6 +247,7 @@ async function hasPendingCaptcha(userId) {
     }
 }
 
+// FIX: Sửa lỗi syntax "..." thừa
 function formatBankResult(result, accountNumber) {
     if (!result || result.length === 0) {
         return `❌ *KHÔNG TÌM THẤY THÔNG TIN*\n\n🔢 Số tài khoản: \`${accountNumber}\`\n\n_Vui lòng kiểm tra lại số tài khoản_`;
@@ -280,8 +281,19 @@ function formatBankResult(result, accountNumber) {
 async function checkBankAccount(accountNumber) {
     const browser = await getBrowser();
     const page = await browser.newPage();
+
     try {
         console.log(`[${new Date().toISOString()}] Checking account: ${accountNumber}`);
+
+        // Thêm headers để giả lập browser Việt Nam
+        await page.setExtraHTTPHeaders({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        });
+
+        // Thêm delay ngẫu nhiên để tránh detection
+        await new Promise(resolve => setTimeout(resolve, Math.random() * 2000 + 1000));
 
         await page.goto('https://muabanpm.com', {
             waitUntil: 'domcontentloaded',
@@ -289,8 +301,13 @@ async function checkBankAccount(accountNumber) {
         });
 
         await page.waitForSelector('#input-from', { timeout: 15000 });
-        await page.type('#input-from', accountNumber, { delay: 80 });
+
+        // Thêm delay khi type để giả lập human
+        await page.type('#input-from', accountNumber, { delay: 100 + Math.random() * 50 });
         await page.keyboard.press('Tab');
+
+        // Thêm delay trước khi check kết quả
+        await new Promise(resolve => setTimeout(resolve, 1500));
 
         await page.waitForFunction(
             () => {
@@ -304,18 +321,23 @@ async function checkBankAccount(accountNumber) {
         const result = await page.evaluate(() => {
             const data = [];
             const name = document.querySelector('#addon-from')?.innerText.trim();
-            if (!name || name.toLowerCase().includes('loading')) return ['Không tìm thấy tên tài khoản'];
+            if (!name || name.toLowerCase().includes('loading')) {
+                return ['Không tìm thấy tên tài khoản'];
+            }
             data.push('✅ ' + name);
+
             document.querySelectorAll('#pay-from .pay')?.forEach(el => {
                 const text = el.textContent?.trim();
                 if (text) data.push(text);
             });
+
             return data;
         });
 
         console.log(`[${new Date().toISOString()}] Account check success: ${accountNumber}`);
         await page.close();
         return result;
+
     } catch (err) {
         console.error(`[${new Date().toISOString()}] Account check error: ${accountNumber}`, err.message);
         await page.close();
