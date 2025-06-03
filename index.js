@@ -5,13 +5,12 @@ const puppeteer = require('puppeteer');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const fetch = require('node-fetch').default;
 
 const app = express();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = process.env.ADMIN_ID;
 
-let db, captchaDb, ipDb;
+let db, captchaDb, ipDb, fetch;
 let browser = null;
 let browserRestartCount = 0;
 
@@ -29,6 +28,7 @@ async function initDB() {
     try {
         const { Low } = await import('lowdb');
         const { JSONFile } = await import('lowdb/node');
+        fetch = (await import('node-fetch')).default; // FIX: Dynamic import
 
         db = new Low(new JSONFile('./history.json'), { users: {} });
         captchaDb = new Low(new JSONFile('./captcha.json'), { captchas: {} });
@@ -179,10 +179,18 @@ async function sendScreenshotToAdmin(screenshotPath, accountNumber, error) {
     }
 }
 
-// Kiểm tra kết nối mạng
+// FIX: Kiểm tra kết nối mạng với timeout
 async function checkNetwork() {
     try {
-        const response = await fetch('https://muabanpm.com', { method: 'HEAD', timeout: 5000 });
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+        const response = await fetch('https://muabanpm.com', {
+            method: 'HEAD',
+            signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
         return response.ok;
     } catch (error) {
         console.error('Network check failed:', error.message);
@@ -190,7 +198,7 @@ async function checkNetwork() {
     }
 }
 
-// Retry navigation
+// FIX: Retry navigation với Promise thay vì waitForTimeout
 async function navigateWithRetry(page, url, maxRetries = 3) {
     for (let i = 0; i < maxRetries; i++) {
         try {
@@ -204,12 +212,13 @@ async function navigateWithRetry(page, url, maxRetries = 3) {
         } catch (error) {
             console.error(`Navigation attempt ${i + 1} failed:`, error.message);
             if (i === maxRetries - 1) throw error;
-            await page.waitForTimeout(5000);
+            // FIX: Thay waitForTimeout bằng Promise
+            await new Promise(resolve => setTimeout(resolve, 5000));
         }
     }
 }
 
-// Retry click tab
+// FIX: Retry click tab với Promise
 async function clickTabWithRetry(page, maxRetries = 3) {
     for (let i = 0; i < maxRetries; i++) {
         try {
@@ -236,18 +245,19 @@ async function clickTabWithRetry(page, maxRetries = 3) {
                 }
             });
 
-            await page.waitForTimeout(5000);
+            // FIX: Thay waitForTimeout bằng Promise
+            await new Promise(resolve => setTimeout(resolve, 5000));
             console.log(`[${new Date().toISOString()}] Tab clicked successfully`);
             return true;
         } catch (error) {
             console.error(`Tab click attempt ${i + 1} failed:`, error.message);
             if (i === maxRetries - 1) throw error;
-            await page.waitForTimeout(3000);
+            await new Promise(resolve => setTimeout(resolve, 3000));
         }
     }
 }
 
-// Retry input
+// FIX: Retry input với Promise
 async function inputAccountNumber(page, accountNumber, maxRetries = 3) {
     for (let i = 0; i < maxRetries; i++) {
         try {
@@ -262,7 +272,7 @@ async function inputAccountNumber(page, accountNumber, maxRetries = 3) {
             });
 
             await page.click('#input-from', { clickCount: 3 });
-            await page.waitForTimeout(500);
+            await new Promise(resolve => setTimeout(resolve, 500));
             await page.type('#input-from', accountNumber, { delay: 200 + Math.random() * 100 });
 
             await page.keyboard.press('Tab');
@@ -280,12 +290,12 @@ async function inputAccountNumber(page, accountNumber, maxRetries = 3) {
         } catch (error) {
             console.error(`Input attempt ${i + 1} failed:`, error.message);
             if (i === maxRetries - 1) throw error;
-            await page.waitForTimeout(3000);
+            await new Promise(resolve => setTimeout(resolve, 3000));
         }
     }
 }
 
-// Retry wait for result
+// FIX: Retry wait for result với Promise
 async function waitForResult(page, maxRetries = 3) {
     for (let i = 0; i < maxRetries; i++) {
         try {
@@ -318,7 +328,7 @@ async function waitForResult(page, maxRetries = 3) {
         } catch (error) {
             console.error(`Result wait attempt ${i + 1} failed:`, error.message);
             if (i === maxRetries - 1) return false;
-            await page.waitForTimeout(5000);
+            await new Promise(resolve => setTimeout(resolve, 5000));
         }
     }
     return false;
@@ -354,7 +364,7 @@ async function checkBankAccount(accountNumber) {
         });
 
         await navigateWithRetry(page, 'https://muabanpm.com');
-        await page.waitForTimeout(5000);
+        await new Promise(resolve => setTimeout(resolve, 5000));
 
         const mainFrame = page.mainFrame();
         if (!mainFrame || mainFrame.isDetached()) {
@@ -439,7 +449,7 @@ async function checkBankAccount(accountNumber) {
     }
 }
 
-// Các hàm kiểm tra giới hạn và CAPTCHA (giữ nguyên từ bản gốc)
+// Các hàm kiểm tra giới hạn và CAPTCHA
 async function canCheckToday(userId) {
     if (isAdmin(userId)) return true;
 
@@ -945,6 +955,80 @@ bot.command('stats', async (ctx) => {
     }
 });
 
+// API Routes cho Vue.js frontend
+app.get('/api/stats', async (req, res) => {
+    try {
+        await db.read();
+        const users = db.data && db.data.users ? Object.keys(db.data.users).length : 0;
+        let totalChecks = 0;
+        let todayChecks = 0;
+        const today = new Date().toISOString().slice(0, 10);
+
+        if (db.data && db.data.users) {
+            for (const user of Object.values(db.data.users)) {
+                if (user.checks) {
+                    for (const [date, count] of Object.entries(user.checks)) {
+                        totalChecks += count;
+                        if (date === today) todayChecks += count;
+                    }
+                }
+            }
+        }
+
+        res.json({
+            users,
+            totalChecks,
+            todayChecks,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to get stats' });
+    }
+});
+
+app.post('/api/check-account', async (req, res) => {
+    const { accountNumber } = req.body;
+
+    if (!accountNumber || !/^[0-9]{9,14}$/.test(accountNumber)) {
+        return res.status(400).json({ error: 'Invalid account number' });
+    }
+
+    try {
+        const result = await checkBankAccount(accountNumber);
+        res.json({ result });
+    } catch (error) {
+        res.status(500).json({ error: 'Check failed' });
+    }
+});
+
+app.get('/api/screenshots', async (req, res) => {
+    try {
+        const files = fs.readdirSync(screenshotDir)
+            .filter(file => file.endsWith('.png'))
+            .sort((a, b) => fs.statSync(path.join(screenshotDir, b)).mtime - fs.statSync(path.join(screenshotDir, a)).mtime)
+            .slice(0, 10);
+
+        const screenshots = files.map(file => {
+            const stats = fs.statSync(path.join(screenshotDir, file));
+            return {
+                filename: file,
+                timestamp: stats.mtime,
+                url: `/screenshots/${file}`
+            };
+        });
+
+        res.json(screenshots);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to get screenshots' });
+    }
+});
+
+// Serve screenshot files
+app.use('/screenshots', express.static(screenshotDir));
+
+// Serve Vue.js static files
+app.use(express.static(path.join(__dirname, 'dist')));
+
 // Khởi động bot
 async function startBot() {
     await initDB();
@@ -977,6 +1061,11 @@ app.get('/health', (req, res) => {
         uptime: process.uptime(),
         environment: 'production'
     });
+});
+
+// Catch-all handler cho Vue.js
+app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
 // Cleanup screenshots
