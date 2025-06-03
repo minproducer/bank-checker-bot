@@ -3,7 +3,6 @@ require('dotenv').config();
 const express = require('express');
 const { Telegraf } = require('telegraf');
 const puppeteer = require('puppeteer');
-const fetch = require('node-fetch');
 const crypto = require('crypto');
 const fs = require('fs');
 const app = express();
@@ -11,11 +10,12 @@ const app = express();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = process.env.ADMIN_ID;
 
-let db, captchaDb, ipDb;
+let db, captchaDb, ipDb, fetch;
 
-// Khởi tạo DB với dynamic import
+// Khởi tạo DB và fetch với dynamic import
 async function initDB() {
     const { Low, JSONFile } = await import('lowdb');
+    fetch = (await import('node-fetch')).default;
 
     db = new Low(new JSONFile('./history.json'));
     captchaDb = new Low(new JSONFile('./captcha.json'));
@@ -32,7 +32,7 @@ async function getBrowser() {
     if (!browser || !browser.isConnected()) {
         browser = await puppeteer.launch({
             headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
         });
     }
     return browser;
@@ -55,7 +55,6 @@ function generateCaptcha() {
 
 // Kiểm tra và ghi nhận lượt check user
 async function canCheckToday(userId) {
-    // Admin không giới hạn lượt
     if (isAdmin(userId)) return true;
 
     await db.read();
@@ -67,7 +66,6 @@ async function canCheckToday(userId) {
 }
 
 async function recordCheck(userId) {
-    // Admin không cần ghi nhận lượt
     if (isAdmin(userId)) return;
 
     await db.read();
@@ -79,7 +77,6 @@ async function recordCheck(userId) {
 }
 
 async function remainingChecks(userId) {
-    // Admin luôn có unlimited
     if (isAdmin(userId)) return '∞';
 
     await db.read();
@@ -98,8 +95,9 @@ async function resetUserChecks(userId) {
     await db.write();
 }
 
-// Kiểm tra và ghi nhận lượt check IP
+// Kiểm tra và ghi nhận lượt check IP - FIX: Cải thiện lấy IP
 async function canCheckIP(ip) {
+    if (ip === 'unknown') return true; // Bỏ qua nếu không lấy được IP
     await ipDb.read();
     const today = new Date().toISOString().slice(0, 10);
     ipDb.data.ips[ip] ||= {};
@@ -109,6 +107,7 @@ async function canCheckIP(ip) {
 }
 
 async function recordCheckIP(ip) {
+    if (ip === 'unknown') return; // Bỏ qua nếu không lấy được IP
     await ipDb.read();
     const today = new Date().toISOString().slice(0, 10);
     ipDb.data.ips[ip][today]++;
@@ -128,7 +127,7 @@ async function checkUserCaptcha(userId, text) {
     await captchaDb.read();
     const entry = captchaDb.data.captchas[userId];
     if (!entry) return false;
-    if (Date.now() - entry.timestamp > 10 * 60 * 1000) { // 10 phút hết hạn
+    if (Date.now() - entry.timestamp > 10 * 60 * 1000) {
         delete captchaDb.data.captchas[userId];
         await captchaDb.write();
         return false;
@@ -159,13 +158,11 @@ function formatBankResult(result, accountNumber) {
     let formatted = `✅ *THÔNG TIN TÀI KHOẢN*\n\n`;
     formatted += `🔢 *Số tài khoản:* \`${accountNumber}\`\n`;
 
-    // Tên chủ tài khoản
     if (result[0]) {
         const name = result[0].replace('✅ ', '');
         formatted += `👤 *Chủ tài khoản:* \`${name}\`\n\n`;
     }
 
-    // Danh sách ngân hàng
     if (result.length > 1) {
         formatted += `🏦 *Ngân hàng hỗ trợ:*\n`;
         for (let i = 1; i < result.length; i++) {
@@ -179,23 +176,31 @@ function formatBankResult(result, accountNumber) {
     return formatted;
 }
 
-// Hàm kiểm tra tài khoản ngân hàng
+// FIX: Cải thiện hàm kiểm tra tài khoản với logging và timeout tốt hơn
 async function checkBankAccount(accountNumber) {
     const browser = await getBrowser();
     const page = await browser.newPage();
     try {
-        await page.goto('https://muabanpm.com', { waitUntil: 'domcontentloaded', timeout: 20000 });
-        await page.waitForSelector('#input-from', { timeout: 10000 });
+        console.log(`[${new Date().toISOString()}] Checking account: ${accountNumber}`);
+
+        await page.goto('https://muabanpm.com', {
+            waitUntil: 'domcontentloaded',
+            timeout: 30000
+        });
+
+        await page.waitForSelector('#input-from', { timeout: 15000 });
         await page.type('#input-from', accountNumber, { delay: 80 });
         await page.keyboard.press('Tab');
+
         await page.waitForFunction(
             () => {
                 const el = document.querySelector('#addon-from');
                 const text = el?.innerText?.trim();
                 return text && text !== 'Loading...' && text.length > 3;
             },
-            { timeout: 10000 }
+            { timeout: 15000 }
         );
+
         const result = await page.evaluate(() => {
             const data = [];
             const name = document.querySelector('#addon-from')?.innerText.trim();
@@ -207,17 +212,25 @@ async function checkBankAccount(accountNumber) {
             });
             return data;
         });
+
+        console.log(`[${new Date().toISOString()}] Account check success: ${accountNumber}`);
         await page.close();
         return result;
     } catch (err) {
+        console.error(`[${new Date().toISOString()}] Account check error: ${accountNumber}`, err.message);
         await page.close();
         return [`❌ Lỗi: ${err.message}`];
     }
 }
 
-// Lấy IP từ Telegram webhook (nếu có)
+// FIX: Cải thiện lấy IP từ nhiều nguồn
 function getIP(ctx) {
-    return ctx?.request?.ip || 'unknown';
+    return ctx?.request?.ip ||
+        ctx?.req?.ip ||
+        ctx?.req?.connection?.remoteAddress ||
+        ctx?.req?.socket?.remoteAddress ||
+        (ctx?.req?.headers && ctx.req.headers['x-forwarded-for']) ||
+        'unknown';
 }
 
 // Bot logic
@@ -232,7 +245,7 @@ bot.start((ctx) => {
         `🔧 *Lệnh hỗ trợ:*\n` +
         `• /checklimit - Xem số lượt còn lại\n` +
         `• /help - Hướng dẫn chi tiết\n` +
-        (isAdminUser ? `• /stats - Thống kê hệ thống\n• /reset @username - Reset lượt user\n` : '') +
+        (isAdminUser ? `• /stats - Thống kê hệ thống\n• /reset - Reset lượt user\n` : '') +
         `\n_Hãy gửi số tài khoản để bắt đầu!_`;
 
     ctx.reply(welcomeMsg, { parse_mode: 'Markdown' });
@@ -253,16 +266,30 @@ bot.command('help', (ctx) => {
         `⚡ *Lệnh hữu ích:*\n` +
         `• /checklimit - Xem lượt còn lại\n` +
         `• /start - Khởi động lại bot\n` +
-        (isAdminUser ? `\n🔧 *Lệnh Admin:*\n• /stats - Thống kê hệ thống\n• /reset @username - Reset lượt user\n• /reset all - Reset tất cả user\n` : '') +
+        (isAdminUser ? `\n🔧 *Lệnh Admin:*\n• /stats - Thống kê hệ thống\n• /reset - Reset lượt user\n` : '') +
         `\n❓ *Cần hỗ trợ?* Liên hệ admin.`;
 
     ctx.reply(helpMsg, { parse_mode: 'Markdown' });
 });
 
-// Lệnh reset cho admin
+// FIX: Gộp 2 handler /reset thành 1 để tránh xung đột
 bot.command('reset', async (ctx) => {
     if (!isAdmin(ctx.from.id)) {
         ctx.reply('🚫 *KHÔNG CÓ QUYỀN*\n\n_Chỉ admin mới có thể sử dụng lệnh này._', { parse_mode: 'Markdown' });
+        return;
+    }
+
+    // Nếu reply tin nhắn của user khác
+    if (ctx.message.reply_to_message) {
+        const targetUserId = ctx.message.reply_to_message.from.id.toString();
+        await resetUserChecks(targetUserId);
+
+        const resetReplyMsg = `✅ *RESET THÀNH CÔNG*\n\n` +
+            `👤 User: ${ctx.message.reply_to_message.from.first_name}\n` +
+            `🆔 ID: \`${targetUserId}\`\n` +
+            `🔄 Đã khôi phục 10 lượt kiểm tra\n\n` +
+            `_User có thể tiếp tục sử dụng bot._`;
+        ctx.reply(resetReplyMsg, { parse_mode: 'Markdown' });
         return;
     }
 
@@ -270,9 +297,9 @@ bot.command('reset', async (ctx) => {
     if (args.length < 2) {
         const resetHelpMsg = `🔧 *HƯỚNG DẪN RESET*\n\n` +
             `📝 *Cách sử dụng:*\n` +
-            `• \`/reset @username\` - Reset lượt cho user cụ thể\n` +
-            `• \`/reset all\` - Reset lượt cho tất cả user\n` +
-            `• \`/reset 123456789\` - Reset theo User ID\n\n` +
+            `• Reply tin nhắn user + \`/reset\`\n` +
+            `• \`/reset 123456789\` - Reset theo User ID\n` +
+            `• \`/reset all\` - Reset tất cả user\n\n` +
             `⚠️ _Lệnh này chỉ reset lượt kiểm tra trong ngày hiện tại._`;
         ctx.reply(resetHelpMsg, { parse_mode: 'Markdown' });
         return;
@@ -281,7 +308,6 @@ bot.command('reset', async (ctx) => {
     const target = args[1];
 
     if (target === 'all') {
-        // Reset tất cả user
         await db.read();
         const today = new Date().toISOString().slice(0, 10);
         let resetCount = 0;
@@ -300,17 +326,7 @@ bot.command('reset', async (ctx) => {
             `_Tất cả user đã được khôi phục 10 lượt kiểm tra._`;
         ctx.reply(resetAllMsg, { parse_mode: 'Markdown' });
 
-    } else if (target.startsWith('@')) {
-        // Reset theo username (cần forward message hoặc reply)
-        const resetUsernameMsg = `⚠️ *RESET THEO USERNAME*\n\n` +
-            `📝 Để reset theo username, bạn cần:\n` +
-            `1. Reply tin nhắn của user đó với \`/reset\`\n` +
-            `2. Hoặc sử dụng User ID: \`/reset 123456789\`\n\n` +
-            `💡 _Username không đủ để xác định chính xác user._`;
-        ctx.reply(resetUsernameMsg, { parse_mode: 'Markdown' });
-
     } else if (/^\d+$/.test(target)) {
-        // Reset theo User ID
         await resetUserChecks(target);
         const resetUserMsg = `✅ *RESET USER THÀNH CÔNG*\n\n` +
             `👤 User ID: \`${target}\`\n` +
@@ -320,24 +336,7 @@ bot.command('reset', async (ctx) => {
         ctx.reply(resetUserMsg, { parse_mode: 'Markdown' });
 
     } else {
-        ctx.reply('❌ *ĐỊNH DẠNG SAI*\n\n_Vui lòng sử dụng: /reset @username hoặc /reset 123456789_', { parse_mode: 'Markdown' });
-    }
-});
-
-// Reset user khi reply tin nhắn
-bot.command('reset', async (ctx) => {
-    if (!isAdmin(ctx.from.id)) return;
-
-    if (ctx.message.reply_to_message) {
-        const targetUserId = ctx.message.reply_to_message.from.id.toString();
-        await resetUserChecks(targetUserId);
-
-        const resetReplyMsg = `✅ *RESET THÀNH CÔNG*\n\n` +
-            `👤 User: ${ctx.message.reply_to_message.from.first_name}\n` +
-            `🆔 ID: \`${targetUserId}\`\n` +
-            `🔄 Đã khôi phục 10 lượt kiểm tra\n\n` +
-            `_User có thể tiếp tục sử dụng bot._`;
-        ctx.reply(resetReplyMsg, { parse_mode: 'Markdown' });
+        ctx.reply('❌ *ĐỊNH DẠNG SAI*\n\n_Vui lòng sử dụng: /reset 123456789 hoặc /reset all_', { parse_mode: 'Markdown' });
     }
 });
 
@@ -346,7 +345,6 @@ bot.hears(/^[0-9]{9,14}$/, async (ctx) => {
     const ip = getIP(ctx);
     const acc = ctx.message.text;
 
-    // Nếu user đang có Captcha chờ xác thực
     if (await hasPendingCaptcha(userId)) {
         const pendingMsg = `🚫 *CAPTCHA ĐANG CHỜ XÁC THỰC*\n\n` +
             `⚠️ Bạn cần trả lời Captcha trước khi tiếp tục kiểm tra tài khoản.\n\n` +
@@ -355,9 +353,7 @@ bot.hears(/^[0-9]{9,14}$/, async (ctx) => {
         return;
     }
 
-    // Admin bỏ qua kiểm tra IP
     if (!isAdmin(userId)) {
-        // Chống spam IP
         if (!(await canCheckIP(ip))) {
             const question = await setUserCaptcha(userId);
             const ipLimitMsg = `🚨 *GIỚI HẠN IP*\n\n` +
@@ -368,7 +364,6 @@ bot.hears(/^[0-9]{9,14}$/, async (ctx) => {
             return;
         }
 
-        // Giới hạn lượt user (Admin bỏ qua)
         if (!(await canCheckToday(userId))) {
             const question = await setUserCaptcha(userId);
             const userLimitMsg = `📊 *HẾT LƯỢT KIỂM TRA*\n\n` +
@@ -380,25 +375,21 @@ bot.hears(/^[0-9]{9,14}$/, async (ctx) => {
         }
     }
 
-    // Thông báo đang xử lý
     ctx.replyWithChatAction('typing');
     const processingMsg = `🔍 *ĐANG KIỂM TRA...*\n\n` +
         `🔢 Số tài khoản: \`${acc}\`\n\n` +
         `⏳ _Vui lòng đợi trong giây lát..._`;
     const processingMessage = await ctx.reply(processingMsg, { parse_mode: 'Markdown' });
 
-    // Thực hiện kiểm tra
     const result = await checkBankAccount(acc);
     const formattedResult = formatBankResult(result, acc);
 
-    // Xóa thông báo đang xử lý và gửi kết quả
     try {
         await ctx.deleteMessage(processingMessage.message_id);
     } catch (e) { }
 
     await ctx.reply(formattedResult, { parse_mode: 'Markdown' });
 
-    // Ghi nhận lượt check và hiển thị lượt còn lại
     await recordCheck(userId);
     if (!isAdmin(userId)) await recordCheckIP(ip);
 
@@ -448,7 +439,6 @@ bot.command('checklimit', async (ctx) => {
     ctx.reply(limitMsg, { parse_mode: 'Markdown' });
 });
 
-// Stats cho admin
 bot.command('stats', async (ctx) => {
     if (!isAdmin(ctx.from.id)) {
         ctx.reply('🚫 *KHÔNG CÓ QUYỀN*\n\n_Chỉ admin mới có thể xem thống kê._', { parse_mode: 'Markdown' });
@@ -482,7 +472,6 @@ bot.command('stats', async (ctx) => {
 async function startBot() {
     await initDB();
 
-    // Đăng ký webhook và route xử lý
     if (process.env.WEBHOOK_URL) {
         bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/telegram`);
         app.use(bot.webhookCallback('/telegram'));
@@ -515,13 +504,11 @@ app.listen(PORT, () => {
     console.log(`✅ Server is running on port ${PORT}`);
 });
 
-// Đảm bảo đóng browser khi tắt server
 process.on('SIGINT', async () => {
     if (browser) await browser.close();
     process.exit();
 });
 
-// Xử lý lỗi chung
 bot.catch((err, ctx) => {
     console.error('Bot error:', err);
     const errorMsg = `⚠️ *LỖI HỆ THỐNG*\n\n` +
@@ -530,5 +517,6 @@ bot.catch((err, ctx) => {
     ctx.reply(errorMsg, { parse_mode: 'Markdown' }).catch(() => { });
 });
 
-// Khởi động bot
 startBot();
+// Export app for testing or external use
+module.exports = app;
