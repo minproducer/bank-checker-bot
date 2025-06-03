@@ -5,12 +5,22 @@ const { Telegraf } = require('telegraf');
 const puppeteer = require('puppeteer');
 const crypto = require('crypto');
 const fs = require('fs');
+const path = require('path');
 const app = express();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = process.env.ADMIN_ID;
 
 let db, captchaDb, ipDb, fetch;
+
+// Middleware để parse JSON
+app.use(express.json());
+
+// Tạo thư mục screenshots nếu chưa có
+const screenshotDir = './screenshots';
+if (!fs.existsSync(screenshotDir)) {
+    fs.mkdirSync(screenshotDir);
+}
 
 // FIX: Cải thiện khởi tạo database với error handling
 async function initDB() {
@@ -48,7 +58,15 @@ async function getBrowser() {
     if (!browser || !browser.isConnected()) {
         browser = await puppeteer.launch({
             headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process'
+            ]
         });
     }
     return browser;
@@ -65,6 +83,50 @@ function generateCaptcha() {
         question: `🔐 *CAPTCHA VERIFICATION*\n\n🧮 Vui lòng giải phép tính sau:\n\`${a} + ${b} = ?\`\n\n⏰ _Có hiệu lực trong 10 phút_`,
         answer: (a + b).toString()
     };
+}
+
+// Function chụp màn hình khi lỗi
+async function captureErrorScreenshot(page, accountNumber, error) {
+    try {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const filename = `error_${accountNumber}_${timestamp}.png`;
+        const filepath = path.join(screenshotDir, filename);
+
+        await page.screenshot({
+            path: filepath,
+            fullPage: true,
+            type: 'png'
+        });
+
+        console.log(`📸 Screenshot saved: ${filepath}`);
+        return filepath;
+    } catch (screenshotError) {
+        console.error('Failed to capture screenshot:', screenshotError);
+        return null;
+    }
+}
+
+// Function gửi screenshot cho admin
+async function sendScreenshotToAdmin(screenshotPath, accountNumber, error) {
+    if (!screenshotPath || !fs.existsSync(screenshotPath)) return;
+
+    try {
+        const caption = `🚨 *LỖI KIỂM TRA TÀI KHOẢN*\n\n` +
+            `🔢 Số TK: \`${accountNumber}\`\n` +
+            `❌ Lỗi: ${error}\n` +
+            `⏰ Thời gian: ${new Date().toLocaleString('vi-VN')}`;
+
+        await bot.telegram.sendPhoto(ADMIN_ID, {
+            source: fs.createReadStream(screenshotPath)
+        }, {
+            caption: caption,
+            parse_mode: 'Markdown'
+        });
+
+        console.log(`📤 Screenshot sent to admin: ${screenshotPath}`);
+    } catch (sendError) {
+        console.error('Failed to send screenshot to admin:', sendError);
+    }
 }
 
 // FIX: Thêm null checks cho tất cả database operations
@@ -278,7 +340,7 @@ function formatBankResult(result, accountNumber) {
     return formatted;
 }
 
-// FIX: Cải thiện timeout và error handling cho checkBankAccount
+// FIX: Cải thiện checkBankAccount với logic click tab và timeout ngắn hơn
 async function checkBankAccount(accountNumber) {
     const browser = await getBrowser();
     const page = await browser.newPage();
@@ -286,60 +348,100 @@ async function checkBankAccount(accountNumber) {
     try {
         console.log(`[${new Date().toISOString()}] Checking account: ${accountNumber}`);
 
-        // FIX: Tăng timeout cho page
-        await page.setDefaultNavigationTimeout(60000); // 60s
-        await page.setDefaultTimeout(60000); // 60s
+        // FIX: Giảm timeout xuống 20s
+        await page.setDefaultNavigationTimeout(20000);
+        await page.setDefaultTimeout(20000);
 
-        // Thêm headers để giả lập browser Việt Nam
         await page.setExtraHTTPHeaders({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
         });
 
-        // Thêm delay ngẫu nhiên để tránh detection
-        await new Promise(resolve => setTimeout(resolve, Math.random() * 3000 + 2000));
+        await new Promise(resolve => setTimeout(resolve, Math.random() * 2000 + 1000));
 
         await page.goto('https://muabanpm.com', {
             waitUntil: 'domcontentloaded',
-            timeout: 60000
+            timeout: 20000
         });
 
-        // FIX: Tăng timeout cho waitForSelector
-        await page.waitForSelector('#input-from', { timeout: 30000 });
+        // Click vào tab "Mua USDT"
+        await page.evaluate(() => {
+            const tabs = Array.from(document.querySelectorAll('.tab .item'));
+            const buyTab = tabs.find(tab => tab.innerText.includes('Mua USDT'));
+            if (buyTab) {
+                buyTab.click();
+                console.log('Clicked Mua USDT tab');
+            } else {
+                throw new Error('Không tìm thấy tab Mua USDT');
+            }
+        });
 
-        // Thêm delay khi type để giả lập human
-        await page.type('#input-from', accountNumber, { delay: 150 + Math.random() * 100 });
+        await new Promise(resolve => setTimeout(resolve, 1500));
+
+        // FIX: Giảm timeout selector xuống 15s
+        await page.waitForSelector('#input-from', { timeout: 15000 });
+
+        await page.type('#input-from', accountNumber, { delay: 100 + Math.random() * 50 });
         await page.keyboard.press('Tab');
+        await new Promise(resolve => setTimeout(resolve, 2000));
 
-        // Thêm delay trước khi check kết quả
-        await new Promise(resolve => setTimeout(resolve, 3000));
-
-        // FIX: Cải thiện waitForFunction với timeout cao hơn
+        // FIX: Giảm timeout waitForFunction xuống 15s
         await page.waitForFunction(
             () => {
                 const el = document.querySelector('#addon-from');
                 const text = el?.innerText?.trim();
                 return text && text !== 'Loading...' && text.length > 3;
             },
-            { timeout: 30000 }
+            { timeout: 15000 }
         );
 
+        // FIX: Thêm logic kiểm tra chi tiết kết quả
         const result = await page.evaluate(() => {
             const data = [];
-            const name = document.querySelector('#addon-from')?.innerText.trim();
-            if (!name || name.toLowerCase().includes('loading')) {
-                return ['Không tìm thấy tên tài khoản'];
+            const nameEl = document.querySelector('#addon-from');
+            const name = nameEl?.innerText?.trim();
+
+            // Kiểm tra các trường hợp không tìm thấy
+            if (!name ||
+                name.toLowerCase().includes('loading') ||
+                name.toLowerCase().includes('không tìm thấy') ||
+                name.toLowerCase().includes('not found') ||
+                name === '' ||
+                name === '-' ||
+                name.length < 3) {
+                return ['❌ Không tìm thấy thông tin tài khoản'];
             }
+
             data.push('✅ ' + name);
 
-            document.querySelectorAll('#pay-from .pay')?.forEach(el => {
-                const text = el.textContent?.trim();
-                if (text) data.push(text);
-            });
+            // Lấy danh sách ngân hàng
+            const bankElements = document.querySelectorAll('#pay-from .pay');
+            if (bankElements.length > 0) {
+                bankElements.forEach(el => {
+                    const text = el.textContent?.trim();
+                    if (text && text !== '' && text !== '-') {
+                        data.push(text);
+                    }
+                });
+            }
 
             return data;
         });
+
+        // FIX: Kiểm tra kết quả trả về
+        if (!result || result.length === 0) {
+            console.log(`[${new Date().toISOString()}] No result returned for: ${accountNumber}`);
+            await page.close();
+            return ['❌ Không tìm thấy thông tin tài khoản'];
+        }
+
+        // Kiểm tra nếu chỉ có thông báo lỗi
+        if (result.length === 1 && result[0].includes('❌')) {
+            console.log(`[${new Date().toISOString()}] Account not found: ${accountNumber}`);
+            await page.close();
+            return result;
+        }
 
         console.log(`[${new Date().toISOString()}] Account check success: ${accountNumber}`);
         await page.close();
@@ -347,13 +449,20 @@ async function checkBankAccount(accountNumber) {
 
     } catch (err) {
         console.error(`[${new Date().toISOString()}] Account check error: ${accountNumber}`, err.message);
+
+        // Chụp screenshot khi lỗi
+        const screenshotPath = await captureErrorScreenshot(page, accountNumber, err);
+
         await page.close();
 
-        // FIX: Trả về message lỗi chi tiết hơn
+        // FIX: Phân loại lỗi rõ ràng hơn
         if (err.message.includes('timeout') || err.message.includes('Waiting failed')) {
-            return [`❌ Website đang chậm hoặc không phản hồi. Vui lòng thử lại sau.`];
+            return [`❌ Hệ thống quá tải, vui lòng thử lại sau.`, screenshotPath];
         }
-        return [`❌ Lỗi: ${err.message}`];
+        if (err.message.includes('Không tìm thấy tab')) {
+            return [`❌ Giao diện website đã thay đổi, vui lòng liên hệ admin.`, screenshotPath];
+        }
+        return [`❌ Lỗi: ${err.message}`, screenshotPath];
     }
 }
 
@@ -377,7 +486,7 @@ bot.start((ctx) => {
         `🔧 *Lệnh hỗ trợ:*\n` +
         `• /checklimit - Xem số lượt còn lại\n` +
         `• /help - Hướng dẫn chi tiết\n` +
-        (isAdminUser ? `• /stats - Thống kê hệ thống\n• /reset - Reset lượt user\n` : '') +
+        (isAdminUser ? `• /stats - Thống kê hệ thống\n• /reset - Reset lượt user\n• /screenshots - Xem screenshots lỗi\n` : '') +
         `\n_Hãy gửi số tài khoản để bắt đầu!_`;
 
     ctx.reply(welcomeMsg, { parse_mode: 'Markdown' });
@@ -398,7 +507,7 @@ bot.command('help', (ctx) => {
         `⚡ *Lệnh hữu ích:*\n` +
         `• /checklimit - Xem lượt còn lại\n` +
         `• /start - Khởi động lại bot\n` +
-        (isAdminUser ? `\n🔧 *Lệnh Admin:*\n• /stats - Thống kê hệ thống\n• /reset - Reset lượt user\n` : '') +
+        (isAdminUser ? `\n🔧 *Lệnh Admin:*\n• /stats - Thống kê hệ thống\n• /reset - Reset lượt user\n• /screenshots - Xem screenshots lỗi\n` : '') +
         `\n❓ *Cần hỗ trợ?* Liên hệ admin.`;
 
     ctx.reply(helpMsg, { parse_mode: 'Markdown' });
@@ -476,6 +585,36 @@ bot.command('reset', async (ctx) => {
     }
 });
 
+// Thêm command xem screenshots (Admin only)
+bot.command('screenshots', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) {
+        ctx.reply('🚫 *KHÔNG CÓ QUYỀN*\n\n_Chỉ admin mới có thể xem screenshots._', { parse_mode: 'Markdown' });
+        return;
+    }
+
+    try {
+        const files = fs.readdirSync(screenshotDir)
+            .filter(file => file.endsWith('.png'))
+            .sort((a, b) => fs.statSync(path.join(screenshotDir, b)).mtime - fs.statSync(path.join(screenshotDir, a)).mtime)
+            .slice(0, 10); // 10 screenshots mới nhất
+
+        if (files.length === 0) {
+            ctx.reply('📁 *KHÔNG CÓ SCREENSHOTS*\n\n_Chưa có screenshot lỗi nào được lưu._', { parse_mode: 'Markdown' });
+            return;
+        }
+
+        let msg = `📸 *SCREENSHOTS GẦN ĐÂY*\n\n`;
+        files.forEach((file, index) => {
+            const stats = fs.statSync(path.join(screenshotDir, file));
+            msg += `${index + 1}. \`${file}\`\n📅 ${stats.mtime.toLocaleString('vi-VN')}\n\n`;
+        });
+
+        ctx.reply(msg, { parse_mode: 'Markdown' });
+    } catch (error) {
+        ctx.reply('❌ Lỗi khi lấy danh sách screenshots', { parse_mode: 'Markdown' });
+    }
+});
+
 bot.hears(/^[0-9]{9,14}$/, async (ctx) => {
     const userId = ctx.from.id.toString();
     const ip = getIP(ctx);
@@ -514,11 +653,26 @@ bot.hears(/^[0-9]{9,14}$/, async (ctx) => {
     ctx.replyWithChatAction('typing');
     const processingMsg = `🔍 *ĐANG KIỂM TRA...*\n\n` +
         `🔢 Số tài khoản: \`${acc}\`\n\n` +
-        `⏳ _Vui lòng đợi trong giây lát (có thể mất 30-60s)..._`;
+        `⏳ _Vui lòng đợi trong giây lát (có thể mất 15-30s)..._`;
     const processingMessage = await ctx.reply(processingMsg, { parse_mode: 'Markdown' });
 
     const result = await checkBankAccount(acc);
-    const formattedResult = formatBankResult(result, acc);
+
+    // Kiểm tra nếu có screenshot path trong result
+    let screenshotPath = null;
+    let cleanResult = result;
+
+    if (result.length > 1 && result[1] && result[1].includes('.png')) {
+        screenshotPath = result[1];
+        cleanResult = [result[0]]; // Chỉ lấy message, bỏ screenshot path
+
+        // Gửi screenshot cho admin nếu có lỗi
+        if (result[0].includes('❌')) {
+            await sendScreenshotToAdmin(screenshotPath, acc, result[0]);
+        }
+    }
+
+    const formattedResult = formatBankResult(cleanResult, acc);
 
     try {
         await ctx.deleteMessage(processingMessage.message_id);
@@ -627,9 +781,10 @@ async function startBot() {
 
 app.get('/', (req, res) => {
     res.send(`
-    <h1>🏦 Bank Account Checker Bot</h1>
+    <h1>🏦 Bank Account Checker Bot (Railway)</h1>
     <p>✅ Bot is running successfully!</p>
     <p>📊 Status: Active</p>
+    <p>🌐 Environment: Production</p>
     <p>⏰ Last check: ${new Date().toLocaleString('vi-VN')}</p>
   `);
 });
@@ -638,7 +793,8 @@ app.get('/health', (req, res) => {
     res.json({
         status: 'healthy',
         timestamp: new Date().toISOString(),
-        uptime: process.uptime()
+        uptime: process.uptime(),
+        environment: 'production'
     });
 });
 
@@ -651,6 +807,30 @@ process.on('SIGINT', async () => {
     if (browser) await browser.close();
     process.exit();
 });
+
+// Auto cleanup screenshots cũ
+function cleanupOldScreenshots() {
+    try {
+        const files = fs.readdirSync(screenshotDir);
+        const now = Date.now();
+        const maxAge = 7 * 24 * 60 * 60 * 1000; // 7 ngày
+
+        files.forEach(file => {
+            const filepath = path.join(screenshotDir, file);
+            const stats = fs.statSync(filepath);
+
+            if (now - stats.mtime.getTime() > maxAge) {
+                fs.unlinkSync(filepath);
+                console.log(`🗑️ Deleted old screenshot: ${file}`);
+            }
+        });
+    } catch (error) {
+        console.error('Error cleaning up screenshots:', error);
+    }
+}
+
+// Chạy cleanup mỗi 24h
+setInterval(cleanupOldScreenshots, 24 * 60 * 60 * 1000);
 
 // FIX: Cải thiện error handler
 bot.catch((err, ctx) => {
