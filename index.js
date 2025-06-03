@@ -100,3 +100,16 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`✅ Server is running on port ${PORT}`);
 });
+
+// 👇 KHỞI ĐỘNG BOT BẰNG POLLING (TẠM THỜI)
+bot.launch();
+console.log('🤖 Bot is running via polling...');
+// server.js
+// app.get('/', (req, res) => {
+//     res.send('Bot is running.');
+// });
+
+// const PORT = process.env.PORT || 3000;
+// app.listen(PORT, () => {
+//     console.log(`✅ Server is running on port ${PORT}`);
+// });
