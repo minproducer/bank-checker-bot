@@ -1,4 +1,3 @@
-// server.js
 require('dotenv').config();
 const express = require('express');
 const { Telegraf } = require('telegraf');
@@ -6,12 +5,15 @@ const puppeteer = require('puppeteer');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const app = express();
+const fetch = require('node-fetch').default;
 
+const app = express();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = process.env.ADMIN_ID;
 
-let db, captchaDb, ipDb, fetch;
+let db, captchaDb, ipDb;
+let browser = null;
+let browserRestartCount = 0;
 
 // Middleware để parse JSON
 app.use(express.json());
@@ -22,12 +24,11 @@ if (!fs.existsSync(screenshotDir)) {
     fs.mkdirSync(screenshotDir);
 }
 
-// FIX: Cải thiện khởi tạo database với error handling
+// Khởi tạo database với error handling
 async function initDB() {
     try {
         const { Low } = await import('lowdb');
         const { JSONFile } = await import('lowdb/node');
-        fetch = (await import('node-fetch')).default;
 
         db = new Low(new JSONFile('./history.json'), { users: {} });
         captchaDb = new Low(new JSONFile('./captcha.json'), { captchas: {} });
@@ -52,10 +53,7 @@ async function initDB() {
     }
 }
 
-let browser = null;
-let browserRestartCount = 0;
-
-// FIX: Cải thiện getBrowser với args tối ưu để tránh frame detached
+// Khởi tạo browser với args tối ưu
 async function getBrowser() {
     try {
         if (!browser || !browser.isConnected()) {
@@ -78,40 +76,13 @@ async function getBrowser() {
                     '--disable-gpu',
                     '--no-first-run',
                     '--no-zygote',
-                    '--single-process',
-                    // FIX: Args quan trọng để tránh frame detached
                     '--disable-features=site-per-process',
                     '--disable-web-security',
                     '--disable-background-timer-throttling',
                     '--disable-backgrounding-occluded-windows',
                     '--disable-renderer-backgrounding',
                     '--disable-ipc-flooding-protection',
-                    '--disable-hang-monitor',
-                    '--disable-prompt-on-repost',
-                    '--disable-sync',
-                    '--force-color-profile=srgb',
-                    '--metrics-recording-only',
-                    '--disable-default-apps',
-                    '--no-default-browser-check',
-                    '--autoplay-policy=user-gesture-required',
-                    '--disable-background-networking',
-                    '--disable-client-side-phishing-detection',
-                    '--disable-component-update',
-                    '--disable-domain-reliability',
-                    '--disable-extensions',
-                    '--disable-features=AudioServiceOutOfProcess',
-                    '--disable-notifications',
-                    '--disable-offer-store-unmasked-wallet-cards',
-                    '--disable-popup-blocking',
-                    '--disable-print-preview',
-                    '--disable-speech-api',
-                    '--hide-scrollbars',
-                    '--ignore-gpu-blacklist',
-                    '--mute-audio',
-                    '--no-pings',
-                    '--password-store=basic',
-                    '--use-gl=swiftshader',
-                    '--use-mock-keychain'
+                    '--disable-hang-monitor'
                 ]
             });
 
@@ -126,7 +97,7 @@ async function getBrowser() {
     }
 }
 
-// FIX: Function đóng page an toàn
+// Đóng page an toàn
 async function safeClosePage(page) {
     try {
         if (page && !page.isClosed()) {
@@ -137,10 +108,12 @@ async function safeClosePage(page) {
     }
 }
 
+// Kiểm tra admin
 function isAdmin(userId) {
     return userId.toString() === ADMIN_ID;
 }
 
+// Tạo CAPTCHA
 function generateCaptcha() {
     const a = Math.floor(Math.random() * 10) + 1;
     const b = Math.floor(Math.random() * 10) + 1;
@@ -150,7 +123,7 @@ function generateCaptcha() {
     };
 }
 
-// FIX: Function chụp màn hình an toàn
+// Chụp screenshot lỗi
 async function captureErrorScreenshot(page, accountNumber, error) {
     try {
         if (!page || page.isClosed()) {
@@ -183,7 +156,7 @@ async function captureErrorScreenshot(page, accountNumber, error) {
     }
 }
 
-// Function gửi screenshot cho admin
+// Gửi screenshot cho admin
 async function sendScreenshotToAdmin(screenshotPath, accountNumber, error) {
     if (!screenshotPath || !fs.existsSync(screenshotPath)) return;
 
@@ -206,6 +179,267 @@ async function sendScreenshotToAdmin(screenshotPath, accountNumber, error) {
     }
 }
 
+// Kiểm tra kết nối mạng
+async function checkNetwork() {
+    try {
+        const response = await fetch('https://muabanpm.com', { method: 'HEAD', timeout: 5000 });
+        return response.ok;
+    } catch (error) {
+        console.error('Network check failed:', error.message);
+        return false;
+    }
+}
+
+// Retry navigation
+async function navigateWithRetry(page, url, maxRetries = 3) {
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            console.log(`[${new Date().toISOString()}] Navigating to ${url} (attempt ${i + 1})`);
+            await page.goto(url, {
+                waitUntil: 'networkidle0',
+                timeout: 60000
+            });
+            console.log(`[${new Date().toISOString()}] Navigation successful`);
+            return true;
+        } catch (error) {
+            console.error(`Navigation attempt ${i + 1} failed:`, error.message);
+            if (i === maxRetries - 1) throw error;
+            await page.waitForTimeout(5000);
+        }
+    }
+}
+
+// Retry click tab
+async function clickTabWithRetry(page, maxRetries = 3) {
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            const mainFrame = page.mainFrame();
+            if (!mainFrame || mainFrame.isDetached()) {
+                throw new Error('Main frame is detached');
+            }
+
+            const tabExists = await page.evaluate(() => {
+                const tabs = Array.from(document.querySelectorAll('.tab .item'));
+                const buyTab = tabs.find(tab => tab.innerText.includes('Mua USDT'));
+                return !!buyTab;
+            });
+
+            if (!tabExists) {
+                throw new Error('Không tìm thấy tab Mua USDT - giao diện có thể đã thay đổi');
+            }
+
+            await page.evaluate(() => {
+                const tabs = Array.from(document.querySelectorAll('.tab .item'));
+                const buyTab = tabs.find(tab => tab.innerText.includes('Mua USDT'));
+                if (buyTab) {
+                    buyTab.click();
+                }
+            });
+
+            await page.waitForTimeout(5000);
+            console.log(`[${new Date().toISOString()}] Tab clicked successfully`);
+            return true;
+        } catch (error) {
+            console.error(`Tab click attempt ${i + 1} failed:`, error.message);
+            if (i === maxRetries - 1) throw error;
+            await page.waitForTimeout(3000);
+        }
+    }
+}
+
+// Retry input
+async function inputAccountNumber(page, accountNumber, maxRetries = 3) {
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            const mainFrame = page.mainFrame();
+            if (!mainFrame || mainFrame.isDetached()) {
+                throw new Error('Main frame is detached');
+            }
+
+            await page.waitForSelector('#input-from', {
+                timeout: 20000,
+                visible: true
+            });
+
+            await page.click('#input-from', { clickCount: 3 });
+            await page.waitForTimeout(500);
+            await page.type('#input-from', accountNumber, { delay: 200 + Math.random() * 100 });
+
+            await page.keyboard.press('Tab');
+            await page.evaluate(() => {
+                const input = document.querySelector('#input-from');
+                if (input) {
+                    input.blur();
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+            });
+
+            console.log(`[${new Date().toISOString()}] Input successful`);
+            return true;
+        } catch (error) {
+            console.error(`Input attempt ${i + 1} failed:`, error.message);
+            if (i === maxRetries - 1) throw error;
+            await page.waitForTimeout(3000);
+        }
+    }
+}
+
+// Retry wait for result
+async function waitForResult(page, maxRetries = 3) {
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            const mainFrame = page.mainFrame();
+            if (!mainFrame || mainFrame.isDetached()) {
+                throw new Error('Main frame is detached');
+            }
+
+            await page.waitForFunction(
+                () => {
+                    const el = document.querySelector('#addon-from');
+                    if (!el) return false;
+
+                    const text = el.innerText?.trim();
+                    return text &&
+                        text !== 'Loading...' &&
+                        text !== '' &&
+                        text !== '-' &&
+                        text.length > 2 &&
+                        !text.toLowerCase().includes('loading');
+                },
+                {
+                    timeout: 45000,
+                    polling: 2000
+                }
+            );
+
+            console.log(`[${new Date().toISOString()}] Result loaded successfully`);
+            return true;
+        } catch (error) {
+            console.error(`Result wait attempt ${i + 1} failed:`, error.message);
+            if (i === maxRetries - 1) return false;
+            await page.waitForTimeout(5000);
+        }
+    }
+    return false;
+}
+
+// Kiểm tra tài khoản ngân hàng
+async function checkBankAccount(accountNumber) {
+    const browser = await getBrowser();
+    const page = await browser.newPage();
+    let screenshotPath = null;
+
+    try {
+        console.log(`[${new Date().toISOString()}] Starting account check for ${accountNumber}`);
+
+        if (!(await checkNetwork())) {
+            throw new Error('Không thể kết nối tới website, vui lòng kiểm tra mạng và thử lại.');
+        }
+
+        await page.setDefaultNavigationTimeout(60000);
+        await page.setDefaultTimeout(60000);
+        await page.setViewport({ width: 1366, height: 768 });
+
+        await page.setExtraHTTPHeaders({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
+        });
+
+        page.on('response', response => {
+            console.log(`[${new Date().toISOString()}] Response: ${response.url()} - ${response.status()}`);
+        });
+
+        await navigateWithRetry(page, 'https://muabanpm.com');
+        await page.waitForTimeout(5000);
+
+        const mainFrame = page.mainFrame();
+        if (!mainFrame || mainFrame.isDetached()) {
+            throw new Error('Main frame is detached after navigation');
+        }
+
+        await clickTabWithRetry(page);
+        await inputAccountNumber(page, accountNumber);
+
+        console.log(`[${new Date().toISOString()}] Waiting for account name`);
+        const nameLoaded = await waitForResult(page);
+
+        const result = await page.evaluate(() => {
+            const data = [];
+            const nameEl = document.querySelector('#addon-from');
+            const name = nameEl?.innerText?.trim();
+
+            if (!name ||
+                name.toLowerCase().includes('loading') ||
+                name.toLowerCase().includes('không tìm thấy') ||
+                name.toLowerCase().includes('not found') ||
+                name.toLowerCase().includes('error') ||
+                name === '' ||
+                name === '-' ||
+                name.length < 3) {
+                return ['❌ Không tìm thấy thông tin tài khoản'];
+            }
+
+            data.push('✅ ' + name);
+
+            try {
+                const bankElements = document.querySelectorAll('#pay-from .pay');
+                if (bankElements.length > 0) {
+                    bankElements.forEach(el => {
+                        const text = el.textContent?.trim();
+                        if (text && text !== '' && text !== '-' && text.length > 1) {
+                            data.push(text);
+                        }
+                    });
+                }
+            } catch (bankError) {
+                console.log('Error getting banks:', bankError);
+            }
+
+            return data;
+        });
+
+        if (!result || result.length === 0) {
+            console.log(`[${new Date().toISOString()}] No result returned for: ${accountNumber}`);
+            return ['❌ Không tìm thấy thông tin tài khoản'];
+        }
+
+        console.log(`[${new Date().toISOString()}] Account check success: ${accountNumber}`, result);
+        return result;
+
+    } catch (err) {
+        console.error(`[${new Date().toISOString()}] Account check error: ${accountNumber}`, err.message);
+        console.error('Full error:', err);
+
+        try {
+            screenshotPath = await captureErrorScreenshot(page, accountNumber, err);
+        } catch (screenshotError) {
+            console.error('Screenshot error:', screenshotError.message);
+        }
+
+        if (err.message.includes('timeout') || err.message.includes('Waiting failed')) {
+            return [`❌ Trang web phản hồi chậm, vui lòng thử lại sau 1-2 phút.`, screenshotPath];
+        }
+        if (err.message.includes('Navigation timeout') || err.message.includes('net::ERR_')) {
+            return [`❌ Không thể kết nối tới website, vui lòng thử lại sau.`, screenshotPath];
+        }
+        if (err.message.includes('frame is detached')) {
+            return [`❌ Trang web bị ngắt kết nối, vui lòng thử lại.`, screenshotPath];
+        }
+        if (err.message.includes('Không tìm thấy tab')) {
+            return [`❌ Giao diện website đã thay đổi, đang cập nhật bot.`, screenshotPath];
+        }
+
+        return [`❌ Lỗi hệ thống: ${err.message}`, screenshotPath];
+    } finally {
+        await safeClosePage(page);
+    }
+}
+
+// Các hàm kiểm tra giới hạn và CAPTCHA (giữ nguyên từ bản gốc)
 async function canCheckToday(userId) {
     if (isAdmin(userId)) return true;
 
@@ -413,256 +647,6 @@ function formatBankResult(result, accountNumber) {
     return formatted;
 }
 
-// FIX: Hoàn toàn cải thiện checkBankAccount để tránh frame detached
-async function checkBankAccount(accountNumber) {
-    const browser = await getBrowser();
-    const page = await browser.newPage();
-    let screenshotPath = null;
-
-    try {
-        console.log(`[${new Date().toISOString()}] Checking account: ${accountNumber}`);
-
-        // FIX: Tăng timeout và cải thiện settings
-        await page.setDefaultNavigationTimeout(60000);
-        await page.setDefaultTimeout(60000);
-
-        // FIX: Thêm viewport để tránh layout issues
-        await page.setViewport({ width: 1366, height: 768 });
-
-        await page.setExtraHTTPHeaders({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache'
-        });
-
-        await new Promise(resolve => setTimeout(resolve, Math.random() * 5000 + 3000));
-
-        console.log(`[${new Date().toISOString()}] Navigating to muabanpm.com`);
-
-        // FIX: Thay đổi waitUntil để tránh frame detached
-        await page.goto('https://muabanpm.com', {
-            waitUntil: 'load',
-            timeout: 60000
-        });
-
-        // FIX: Thêm delay để đảm bảo page stable
-        await new Promise(resolve => setTimeout(resolve, 5000));
-
-        console.log(`[${new Date().toISOString()}] Page loaded, looking for tabs`);
-
-        // FIX: Retry logic cho tab clicking
-        let tabClicked = false;
-        for (let i = 0; i < 3; i++) {
-            try {
-                const tabExists = await page.evaluate(() => {
-                    const tabs = Array.from(document.querySelectorAll('.tab .item'));
-                    const buyTab = tabs.find(tab => tab.innerText.includes('Mua USDT'));
-                    return !!buyTab;
-                });
-
-                if (!tabExists) {
-                    throw new Error('Không tìm thấy tab Mua USDT - giao diện có thể đã thay đổi');
-                }
-
-                await page.evaluate(() => {
-                    const tabs = Array.from(document.querySelectorAll('.tab .item'));
-                    const buyTab = tabs.find(tab => tab.innerText.includes('Mua USDT'));
-                    if (buyTab) {
-                        buyTab.click();
-                        console.log('Clicked Mua USDT tab');
-                    }
-                });
-
-                tabClicked = true;
-                break;
-            } catch (error) {
-                console.log(`Tab click attempt ${i + 1} failed:`, error.message);
-                if (i < 2) {
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                } else {
-                    throw error;
-                }
-            }
-        }
-
-        if (!tabClicked) {
-            throw new Error('Failed to click tab after 3 attempts');
-        }
-
-        console.log(`[${new Date().toISOString()}] Clicked tab, waiting for form`);
-        await new Promise(resolve => setTimeout(resolve, 5000));
-
-        // FIX: Retry logic cho input field
-        let inputFound = false;
-        for (let i = 0; i < 3; i++) {
-            try {
-                await page.waitForSelector('#input-from', {
-                    timeout: 20000,
-                    visible: true
-                });
-                inputFound = true;
-                break;
-            } catch (error) {
-                console.log(`Input field wait attempt ${i + 1} failed:`, error.message);
-                if (i < 2) {
-                    await new Promise(resolve => setTimeout(resolve, 3000));
-                } else {
-                    throw error;
-                }
-            }
-        }
-
-        if (!inputFound) {
-            throw new Error('Input field not found after 3 attempts');
-        }
-
-        console.log(`[${new Date().toISOString()}] Input field found, typing account number`);
-
-        // FIX: Cải thiện input handling
-        await page.click('#input-from', { clickCount: 3 });
-        await new Promise(resolve => setTimeout(resolve, 500));
-        await page.type('#input-from', accountNumber, { delay: 200 + Math.random() * 100 });
-
-        await page.keyboard.press('Tab');
-        await page.evaluate(() => {
-            const input = document.querySelector('#input-from');
-            if (input) {
-                input.blur();
-                input.dispatchEvent(new Event('change', { bubbles: true }));
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-            }
-        });
-
-        console.log(`[${new Date().toISOString()}] Waiting for account name to load`);
-        await new Promise(resolve => setTimeout(resolve, 6000));
-
-        // FIX: Cải thiện waitForFunction với retry
-        let nameLoaded = false;
-        for (let i = 0; i < 3; i++) {
-            try {
-                await page.waitForFunction(
-                    () => {
-                        const el = document.querySelector('#addon-from');
-                        if (!el) return false;
-
-                        const text = el.innerText?.trim();
-                        console.log('Current text:', text);
-
-                        return text &&
-                            text !== 'Loading...' &&
-                            text !== '' &&
-                            text !== '-' &&
-                            text.length > 2 &&
-                            !text.toLowerCase().includes('loading');
-                    },
-                    {
-                        timeout: 30000,
-                        polling: 2000
-                    }
-                );
-                nameLoaded = true;
-                break;
-            } catch (error) {
-                console.log(`Name load wait attempt ${i + 1} failed:`, error.message);
-                if (i < 2) {
-                    await new Promise(resolve => setTimeout(resolve, 5000));
-                } else {
-                    console.log('Timeout waiting for name, trying to extract anyway...');
-                    nameLoaded = true;
-                    break;
-                }
-            }
-        }
-
-        console.log(`[${new Date().toISOString()}] Extracting data`);
-
-        const result = await page.evaluate(() => {
-            const data = [];
-            const nameEl = document.querySelector('#addon-from');
-            const name = nameEl?.innerText?.trim();
-
-            console.log('Extracted name:', name);
-
-            if (!name ||
-                name.toLowerCase().includes('loading') ||
-                name.toLowerCase().includes('không tìm thấy') ||
-                name.toLowerCase().includes('not found') ||
-                name.toLowerCase().includes('error') ||
-                name === '' ||
-                name === '-' ||
-                name.length < 3) {
-                return ['❌ Không tìm thấy thông tin tài khoản'];
-            }
-
-            data.push('✅ ' + name);
-
-            try {
-                const bankElements = document.querySelectorAll('#pay-from .pay');
-                console.log('Found bank elements:', bankElements.length);
-
-                if (bankElements.length > 0) {
-                    bankElements.forEach(el => {
-                        const text = el.textContent?.trim();
-                        if (text && text !== '' && text !== '-' && text.length > 1) {
-                            data.push(text);
-                        }
-                    });
-                }
-            } catch (bankError) {
-                console.log('Error getting banks:', bankError);
-            }
-
-            return data;
-        });
-
-        if (!result || result.length === 0) {
-            console.log(`[${new Date().toISOString()}] No result returned for: ${accountNumber}`);
-            await safeClosePage(page);
-            return ['❌ Không tìm thấy thông tin tài khoản'];
-        }
-
-        if (result.length === 1 && result[0].includes('❌')) {
-            console.log(`[${new Date().toISOString()}] Account not found: ${accountNumber}`);
-            await safeClosePage(page);
-            return result;
-        }
-
-        console.log(`[${new Date().toISOString()}] Account check success: ${accountNumber}`, result);
-        await safeClosePage(page);
-        return result;
-
-    } catch (err) {
-        console.error(`[${new Date().toISOString()}] Account check error: ${accountNumber}`, err.message);
-        console.error('Full error:', err);
-
-        // FIX: Chụp screenshot trước khi đóng page
-        try {
-            screenshotPath = await captureErrorScreenshot(page, accountNumber, err);
-        } catch (screenshotError) {
-            console.error('Screenshot error:', screenshotError.message);
-        }
-
-        await safeClosePage(page);
-
-        if (err.message.includes('timeout') || err.message.includes('Waiting failed')) {
-            return [`❌ Trang web phản hồi chậm, vui lòng thử lại sau 1-2 phút.`, screenshotPath];
-        }
-        if (err.message.includes('Navigation timeout') || err.message.includes('net::ERR_')) {
-            return [`❌ Không thể kết nối tới website, vui lòng thử lại sau.`, screenshotPath];
-        }
-        if (err.message.includes('Navigating frame was detached')) {
-            return [`❌ Trang web bị ngắt kết nối, vui lòng thử lại.`, screenshotPath];
-        }
-        if (err.message.includes('Không tìm thấy tab')) {
-            return [`❌ Giao diện website đã thay đổi, đang cập nhật bot.`, screenshotPath];
-        }
-
-        return [`❌ Lỗi hệ thống: ${err.message}`, screenshotPath];
-    }
-}
-
 function getIP(ctx) {
     return ctx?.request?.ip ||
         ctx?.req?.ip ||
@@ -672,6 +656,7 @@ function getIP(ctx) {
         'unknown';
 }
 
+// Telegram bot commands
 bot.start((ctx) => {
     const isAdminUser = isAdmin(ctx.from.id);
     const welcomeMsg = `🏦 *BANK ACCOUNT CHECKER*\n\n` +
@@ -960,6 +945,7 @@ bot.command('stats', async (ctx) => {
     }
 });
 
+// Khởi động bot
 async function startBot() {
     await initDB();
 
@@ -973,6 +959,7 @@ async function startBot() {
     console.log('✅ Bot started successfully!');
 }
 
+// Routes
 app.get('/', (req, res) => {
     res.send(`
     <h1>🏦 Bank Account Checker Bot (Railway)</h1>
@@ -992,16 +979,7 @@ app.get('/health', (req, res) => {
     });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`✅ Server is running on port ${PORT}`);
-});
-
-process.on('SIGINT', async () => {
-    if (browser) await browser.close();
-    process.exit();
-});
-
+// Cleanup screenshots
 function cleanupOldScreenshots() {
     try {
         const files = fs.readdirSync(screenshotDir);
@@ -1024,6 +1002,7 @@ function cleanupOldScreenshots() {
 
 setInterval(cleanupOldScreenshots, 24 * 60 * 60 * 1000);
 
+// Xử lý lỗi bot
 bot.catch((err, ctx) => {
     console.error('Bot error:', err);
     const errorMsg = `⚠️ *LỖI HỆ THỐNG*\n\n` +
@@ -1037,6 +1016,17 @@ bot.catch((err, ctx) => {
     }
 });
 
-startBot();
+// Xử lý SIGINT
+process.on('SIGINT', async () => {
+    if (browser) await browser.close();
+    process.exit();
+});
+
+// Khởi động server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`✅ Server is running on port ${PORT}`);
+    startBot();
+});
 
 module.exports = app;
