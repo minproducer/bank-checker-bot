@@ -24,7 +24,7 @@ async function checkBankAccount(accountNumber) {
         await page.waitForSelector('#input-from');
         await page.type('#input-from', accountNumber);
         await page.click('body'); // click ra ngoài để trigger
-        await page.waitForTimeout(3000);
+        await new Promise(resolve => setTimeout(resolve, 3000));
 
         const result = await page.evaluate(() => {
             const data = [];
