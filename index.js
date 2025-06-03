@@ -90,8 +90,9 @@ bot.command('checklimit', (ctx) => {
 });
 
 app.use(bot.webhookCallback('/telegram'));
-bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/telegram`);
-
+// bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/telegram`);
+app.use(bot.webhookCallback('/telegram'));
+// Đặt webhook cho bot
 app.get('/', (req, res) => {
     res.send('Bot is running.');
 });
