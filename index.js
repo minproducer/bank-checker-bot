@@ -12,28 +12,35 @@ const ADMIN_ID = process.env.ADMIN_ID;
 
 let db, captchaDb, ipDb, fetch;
 
-// FIX: Sửa lỗi import JSONFile
+// FIX: Cải thiện khởi tạo database với error handling
 async function initDB() {
-    const { Low } = await import('lowdb');
-    const { JSONFile } = await import('lowdb/node');
-    fetch = (await import('node-fetch')).default;
+    try {
+        const { Low } = await import('lowdb');
+        const { JSONFile } = await import('lowdb/node');
+        fetch = (await import('node-fetch')).default;
 
-    db = new Low(new JSONFile('./history.json'), {});
-    captchaDb = new Low(new JSONFile('./captcha.json'), {});
-    ipDb = new Low(new JSONFile('./ip.json'), {});
+        db = new Low(new JSONFile('./history.json'), { users: {} });
+        captchaDb = new Low(new JSONFile('./captcha.json'), { captchas: {} });
+        ipDb = new Low(new JSONFile('./ip.json'), { ips: {} });
 
-    await db.read();
-    db.data ||= { users: {} };
+        await db.read();
+        await captchaDb.read();
+        await ipDb.read();
 
-    await captchaDb.read();
-    captchaDb.data ||= { captchas: {} };
+        // FIX: Đảm bảo data structure luôn tồn tại
+        db.data = db.data || { users: {} };
+        captchaDb.data = captchaDb.data || { captchas: {} };
+        ipDb.data = ipDb.data || { ips: {} };
 
-    await ipDb.read();
-    ipDb.data ||= { ips: {} };
+        await db.write();
+        await captchaDb.write();
+        await ipDb.write();
 
-    await db.write();
-    await captchaDb.write();
-    await ipDb.write();
+        console.log('✅ Database initialized successfully');
+    } catch (error) {
+        console.error('❌ Database initialization failed:', error);
+        process.exit(1);
+    }
 }
 
 let browser = null;
@@ -60,92 +67,184 @@ function generateCaptcha() {
     };
 }
 
+// FIX: Thêm null checks cho tất cả database operations
 async function canCheckToday(userId) {
     if (isAdmin(userId)) return true;
 
-    await db.read();
-    const today = new Date().toISOString().slice(0, 10);
-    db.data.users[userId] ||= { checks: {} };
-    db.data.users[userId].checks[today] ||= 0;
-    await db.write();
-    return db.data.users[userId].checks[today] < 10;
+    try {
+        await db.read();
+        const today = new Date().toISOString().slice(0, 10);
+
+        if (!db.data) db.data = { users: {} };
+        if (!db.data.users) db.data.users = {};
+        if (!db.data.users[userId]) db.data.users[userId] = { checks: {} };
+        if (!db.data.users[userId].checks) db.data.users[userId].checks = {};
+        if (!db.data.users[userId].checks[today]) db.data.users[userId].checks[today] = 0;
+
+        await db.write();
+        return db.data.users[userId].checks[today] < 10;
+    } catch (error) {
+        console.error('Error in canCheckToday:', error);
+        return false;
+    }
 }
 
 async function recordCheck(userId) {
     if (isAdmin(userId)) return;
 
-    await db.read();
-    const today = new Date().toISOString().slice(0, 10);
-    db.data.users[userId] ||= { checks: {} };
-    db.data.users[userId].checks[today] ||= 0;
-    db.data.users[userId].checks[today]++;
-    await db.write();
+    try {
+        await db.read();
+        const today = new Date().toISOString().slice(0, 10);
+
+        if (!db.data) db.data = { users: {} };
+        if (!db.data.users) db.data.users = {};
+        if (!db.data.users[userId]) db.data.users[userId] = { checks: {} };
+        if (!db.data.users[userId].checks) db.data.users[userId].checks = {};
+        if (!db.data.users[userId].checks[today]) db.data.users[userId].checks[today] = 0;
+
+        db.data.users[userId].checks[today]++;
+        await db.write();
+    } catch (error) {
+        console.error('Error in recordCheck:', error);
+    }
 }
 
 async function remainingChecks(userId) {
     if (isAdmin(userId)) return '∞';
 
-    await db.read();
-    const today = new Date().toISOString().slice(0, 10);
-    if (!db.data.users[userId] || !db.data.users[userId].checks[today]) return 10;
-    return 10 - db.data.users[userId].checks[today];
+    try {
+        await db.read();
+        const today = new Date().toISOString().slice(0, 10);
+
+        if (!db.data || !db.data.users || !db.data.users[userId] || !db.data.users[userId].checks || !db.data.users[userId].checks[today]) {
+            return 10;
+        }
+
+        return 10 - db.data.users[userId].checks[today];
+    } catch (error) {
+        console.error('Error in remainingChecks:', error);
+        return 0;
+    }
 }
 
 async function resetUserChecks(userId) {
-    await db.read();
-    const today = new Date().toISOString().slice(0, 10);
-    if (db.data.users[userId] && db.data.users[userId].checks) {
+    try {
+        await db.read();
+        const today = new Date().toISOString().slice(0, 10);
+
+        if (!db.data) db.data = { users: {} };
+        if (!db.data.users) db.data.users = {};
+        if (!db.data.users[userId]) db.data.users[userId] = { checks: {} };
+        if (!db.data.users[userId].checks) db.data.users[userId].checks = {};
+
         db.data.users[userId].checks[today] = 0;
+        await db.write();
+    } catch (error) {
+        console.error('Error in resetUserChecks:', error);
     }
-    await db.write();
 }
 
 async function canCheckIP(ip) {
     if (ip === 'unknown') return true;
-    await ipDb.read();
-    const today = new Date().toISOString().slice(0, 10);
-    ipDb.data.ips[ip] ||= {};
-    ipDb.data.ips[ip][today] ||= 0;
-    await ipDb.write();
-    return ipDb.data.ips[ip][today] < 20;
+
+    try {
+        await ipDb.read();
+        const today = new Date().toISOString().slice(0, 10);
+
+        if (!ipDb.data) ipDb.data = { ips: {} };
+        if (!ipDb.data.ips) ipDb.data.ips = {};
+        if (!ipDb.data.ips[ip]) ipDb.data.ips[ip] = {};
+        if (!ipDb.data.ips[ip][today]) ipDb.data.ips[ip][today] = 0;
+
+        await ipDb.write();
+        return ipDb.data.ips[ip][today] < 20;
+    } catch (error) {
+        console.error('Error in canCheckIP:', error);
+        return true;
+    }
 }
 
 async function recordCheckIP(ip) {
     if (ip === 'unknown') return;
-    await ipDb.read();
-    const today = new Date().toISOString().slice(0, 10);
-    ipDb.data.ips[ip][today]++;
-    await ipDb.write();
+
+    try {
+        await ipDb.read();
+        const today = new Date().toISOString().slice(0, 10);
+
+        if (!ipDb.data) ipDb.data = { ips: {} };
+        if (!ipDb.data.ips) ipDb.data.ips = {};
+        if (!ipDb.data.ips[ip]) ipDb.data.ips[ip] = {};
+        if (!ipDb.data.ips[ip][today]) ipDb.data.ips[ip][today] = 0;
+
+        ipDb.data.ips[ip][today]++;
+        await ipDb.write();
+    } catch (error) {
+        console.error('Error in recordCheckIP:', error);
+    }
 }
 
 async function setUserCaptcha(userId) {
-    const { question, answer } = generateCaptcha();
-    await captchaDb.read();
-    captchaDb.data.captchas[userId] = { answer, timestamp: Date.now() };
-    await captchaDb.write();
-    return question;
+    try {
+        const { question, answer } = generateCaptcha();
+        await captchaDb.read();
+
+        if (!captchaDb.data) captchaDb.data = { captchas: {} };
+        if (!captchaDb.data.captchas) captchaDb.data.captchas = {};
+
+        captchaDb.data.captchas[userId] = { answer, timestamp: Date.now() };
+        await captchaDb.write();
+        return question;
+    } catch (error) {
+        console.error('Error in setUserCaptcha:', error);
+        return 'Lỗi tạo captcha';
+    }
 }
 
 async function checkUserCaptcha(userId, text) {
-    await captchaDb.read();
-    const entry = captchaDb.data.captchas[userId];
-    if (!entry) return false;
-    if (Date.now() - entry.timestamp > 10 * 60 * 1000) {
-        delete captchaDb.data.captchas[userId];
-        await captchaDb.write();
+    try {
+        await captchaDb.read();
+
+        if (!captchaDb.data || !captchaDb.data.captchas) {
+            return false;
+        }
+
+        const entry = captchaDb.data.captchas[userId];
+        if (!entry) return false;
+
+        if (Date.now() - entry.timestamp > 10 * 60 * 1000) {
+            delete captchaDb.data.captchas[userId];
+            await captchaDb.write();
+            return false;
+        }
+
+        if (entry.answer === text.trim()) {
+            delete captchaDb.data.captchas[userId];
+            await captchaDb.write();
+            return true;
+        }
+
+        return false;
+    } catch (error) {
+        console.error('Error in checkUserCaptcha:', error);
         return false;
     }
-    if (entry.answer === text.trim()) {
-        delete captchaDb.data.captchas[userId];
-        await captchaDb.write();
-        return true;
-    }
-    return false;
 }
 
+// FIX: Sửa lỗi chính - thêm null checks
 async function hasPendingCaptcha(userId) {
-    await captchaDb.read();
-    return !!captchaDb.data.captchas[userId];
+    try {
+        await captchaDb.read();
+
+        // FIX: Kiểm tra tất cả các level của object
+        if (!captchaDb || !captchaDb.data || !captchaDb.data.captchas) {
+            return false;
+        }
+
+        return !!captchaDb.data.captchas[userId];
+    } catch (error) {
+        console.error('Error in hasPendingCaptcha:', error);
+        return false;
+    }
 }
 
 function formatBankResult(result, accountNumber) {
@@ -305,23 +404,29 @@ bot.command('reset', async (ctx) => {
     const target = args[1];
 
     if (target === 'all') {
-        await db.read();
-        const today = new Date().toISOString().slice(0, 10);
-        let resetCount = 0;
+        try {
+            await db.read();
+            const today = new Date().toISOString().slice(0, 10);
+            let resetCount = 0;
 
-        for (const userId in db.data.users) {
-            if (db.data.users[userId].checks && db.data.users[userId].checks[today]) {
-                db.data.users[userId].checks[today] = 0;
-                resetCount++;
+            if (db.data && db.data.users) {
+                for (const userId in db.data.users) {
+                    if (db.data.users[userId].checks && db.data.users[userId].checks[today]) {
+                        db.data.users[userId].checks[today] = 0;
+                        resetCount++;
+                    }
+                }
             }
-        }
 
-        await db.write();
-        const resetAllMsg = `✅ *RESET THÀNH CÔNG*\n\n` +
-            `🔄 Đã reset lượt kiểm tra cho *${resetCount}* user\n` +
-            `📅 Ngày: ${new Date().toLocaleDateString('vi-VN')}\n\n` +
-            `_Tất cả user đã được khôi phục 10 lượt kiểm tra._`;
-        ctx.reply(resetAllMsg, { parse_mode: 'Markdown' });
+            await db.write();
+            const resetAllMsg = `✅ *RESET THÀNH CÔNG*\n\n` +
+                `🔄 Đã reset lượt kiểm tra cho *${resetCount}* user\n` +
+                `📅 Ngày: ${new Date().toLocaleDateString('vi-VN')}\n\n` +
+                `_Tất cả user đã được khôi phục 10 lượt kiểm tra._`;
+            ctx.reply(resetAllMsg, { parse_mode: 'Markdown' });
+        } catch (error) {
+            ctx.reply('❌ Lỗi khi reset tất cả user', { parse_mode: 'Markdown' });
+        }
 
     } else if (/^\d+$/.test(target)) {
         await resetUserChecks(target);
@@ -442,27 +547,35 @@ bot.command('stats', async (ctx) => {
         return;
     }
 
-    await db.read();
-    const users = Object.keys(db.data.users).length;
-    let totalChecks = 0;
-    let todayChecks = 0;
-    const today = new Date().toISOString().slice(0, 10);
+    try {
+        await db.read();
+        const users = db.data && db.data.users ? Object.keys(db.data.users).length : 0;
+        let totalChecks = 0;
+        let todayChecks = 0;
+        const today = new Date().toISOString().slice(0, 10);
 
-    for (const user of Object.values(db.data.users)) {
-        for (const [date, count] of Object.entries(user.checks)) {
-            totalChecks += count;
-            if (date === today) todayChecks += count;
+        if (db.data && db.data.users) {
+            for (const user of Object.values(db.data.users)) {
+                if (user.checks) {
+                    for (const [date, count] of Object.entries(user.checks)) {
+                        totalChecks += count;
+                        if (date === today) todayChecks += count;
+                    }
+                }
+            }
         }
+
+        const statsMsg = `📈 *THỐNG KÊ HỆ THỐNG*\n\n` +
+            `👥 Tổng số user: *${users}*\n` +
+            `🔢 Tổng lượt check: *${totalChecks}*\n` +
+            `📅 Hôm nay: *${todayChecks}*\n` +
+            `🔧 Admin: *${ctx.from.first_name}*\n\n` +
+            `⏰ _Cập nhật: ${new Date().toLocaleString('vi-VN')}_`;
+
+        ctx.reply(statsMsg, { parse_mode: 'Markdown' });
+    } catch (error) {
+        ctx.reply('❌ Lỗi khi lấy thống kê', { parse_mode: 'Markdown' });
     }
-
-    const statsMsg = `📈 *THỐNG KÊ HỆ THỐNG*\n\n` +
-        `👥 Tổng số user: *${users}*\n` +
-        `🔢 Tổng lượt check: *${totalChecks}*\n` +
-        `📅 Hôm nay: *${todayChecks}*\n` +
-        `🔧 Admin: *${ctx.from.first_name}*\n\n` +
-        `⏰ _Cập nhật: ${new Date().toLocaleString('vi-VN')}_`;
-
-    ctx.reply(statsMsg, { parse_mode: 'Markdown' });
 });
 
 async function startBot() {
@@ -505,14 +618,20 @@ process.on('SIGINT', async () => {
     process.exit();
 });
 
+// FIX: Cải thiện error handler
 bot.catch((err, ctx) => {
     console.error('Bot error:', err);
     const errorMsg = `⚠️ *LỖI HỆ THỐNG*\n\n` +
         `🔧 Bot đang gặp sự cố tạm thời.\n\n` +
         `_Vui lòng thử lại sau ít phút._`;
-    ctx.reply(errorMsg, { parse_mode: 'Markdown' }).catch(() => { });
+
+    try {
+        ctx.reply(errorMsg, { parse_mode: 'Markdown' });
+    } catch (replyError) {
+        console.error('Failed to send error message:', replyError);
+    }
 });
 
 startBot();
-// Export the app for testing or other purposes
+
 module.exports = app;
