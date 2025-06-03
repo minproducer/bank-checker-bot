@@ -12,19 +12,28 @@ const ADMIN_ID = process.env.ADMIN_ID;
 
 let db, captchaDb, ipDb, fetch;
 
-// Khởi tạo DB và fetch với dynamic import
+// FIX: Sửa lỗi import JSONFile
 async function initDB() {
-    const { Low, JSONFile } = await import('lowdb');
+    const { Low } = await import('lowdb');
+    const { JSONFile } = await import('lowdb/node');
     fetch = (await import('node-fetch')).default;
 
-    db = new Low(new JSONFile('./history.json'));
-    captchaDb = new Low(new JSONFile('./captcha.json'));
-    ipDb = new Low(new JSONFile('./ip.json'));
+    db = new Low(new JSONFile('./history.json'), {});
+    captchaDb = new Low(new JSONFile('./captcha.json'), {});
+    ipDb = new Low(new JSONFile('./ip.json'), {});
 
-    await db.read(); db.data ||= { users: {} };
-    await captchaDb.read(); captchaDb.data ||= { captchas: {} };
-    await ipDb.read(); ipDb.data ||= { ips: {} };
-    await db.write(); await captchaDb.write(); await ipDb.write();
+    await db.read();
+    db.data ||= { users: {} };
+
+    await captchaDb.read();
+    captchaDb.data ||= { captchas: {} };
+
+    await ipDb.read();
+    ipDb.data ||= { ips: {} };
+
+    await db.write();
+    await captchaDb.write();
+    await ipDb.write();
 }
 
 let browser = null;
@@ -38,12 +47,10 @@ async function getBrowser() {
     return browser;
 }
 
-// Kiểm tra admin
 function isAdmin(userId) {
     return userId.toString() === ADMIN_ID;
 }
 
-// Tạo Captcha đơn giản (biểu thức toán học)
 function generateCaptcha() {
     const a = Math.floor(Math.random() * 10) + 1;
     const b = Math.floor(Math.random() * 10) + 1;
@@ -53,7 +60,6 @@ function generateCaptcha() {
     };
 }
 
-// Kiểm tra và ghi nhận lượt check user
 async function canCheckToday(userId) {
     if (isAdmin(userId)) return true;
 
@@ -85,7 +91,6 @@ async function remainingChecks(userId) {
     return 10 - db.data.users[userId].checks[today];
 }
 
-// Reset lượt check cho user
 async function resetUserChecks(userId) {
     await db.read();
     const today = new Date().toISOString().slice(0, 10);
@@ -95,9 +100,8 @@ async function resetUserChecks(userId) {
     await db.write();
 }
 
-// Kiểm tra và ghi nhận lượt check IP - FIX: Cải thiện lấy IP
 async function canCheckIP(ip) {
-    if (ip === 'unknown') return true; // Bỏ qua nếu không lấy được IP
+    if (ip === 'unknown') return true;
     await ipDb.read();
     const today = new Date().toISOString().slice(0, 10);
     ipDb.data.ips[ip] ||= {};
@@ -107,14 +111,13 @@ async function canCheckIP(ip) {
 }
 
 async function recordCheckIP(ip) {
-    if (ip === 'unknown') return; // Bỏ qua nếu không lấy được IP
+    if (ip === 'unknown') return;
     await ipDb.read();
     const today = new Date().toISOString().slice(0, 10);
     ipDb.data.ips[ip][today]++;
     await ipDb.write();
 }
 
-// Captcha cho user
 async function setUserCaptcha(userId) {
     const { question, answer } = generateCaptcha();
     await captchaDb.read();
@@ -145,7 +148,6 @@ async function hasPendingCaptcha(userId) {
     return !!captchaDb.data.captchas[userId];
 }
 
-// Hàm format kết quả đẹp
 function formatBankResult(result, accountNumber) {
     if (!result || result.length === 0) {
         return `❌ *KHÔNG TÌM THẤY THÔNG TIN*\n\n🔢 Số tài khoản: \`${accountNumber}\`\n\n_Vui lòng kiểm tra lại số tài khoản_`;
@@ -176,7 +178,6 @@ function formatBankResult(result, accountNumber) {
     return formatted;
 }
 
-// FIX: Cải thiện hàm kiểm tra tài khoản với logging và timeout tốt hơn
 async function checkBankAccount(accountNumber) {
     const browser = await getBrowser();
     const page = await browser.newPage();
@@ -223,7 +224,6 @@ async function checkBankAccount(accountNumber) {
     }
 }
 
-// FIX: Cải thiện lấy IP từ nhiều nguồn
 function getIP(ctx) {
     return ctx?.request?.ip ||
         ctx?.req?.ip ||
@@ -233,7 +233,6 @@ function getIP(ctx) {
         'unknown';
 }
 
-// Bot logic
 bot.start((ctx) => {
     const isAdminUser = isAdmin(ctx.from.id);
     const welcomeMsg = `🏦 *BANK ACCOUNT CHECKER*\n\n` +
@@ -272,14 +271,12 @@ bot.command('help', (ctx) => {
     ctx.reply(helpMsg, { parse_mode: 'Markdown' });
 });
 
-// FIX: Gộp 2 handler /reset thành 1 để tránh xung đột
 bot.command('reset', async (ctx) => {
     if (!isAdmin(ctx.from.id)) {
         ctx.reply('🚫 *KHÔNG CÓ QUYỀN*\n\n_Chỉ admin mới có thể sử dụng lệnh này._', { parse_mode: 'Markdown' });
         return;
     }
 
-    // Nếu reply tin nhắn của user khác
     if (ctx.message.reply_to_message) {
         const targetUserId = ctx.message.reply_to_message.from.id.toString();
         await resetUserChecks(targetUserId);
@@ -468,7 +465,6 @@ bot.command('stats', async (ctx) => {
     ctx.reply(statsMsg, { parse_mode: 'Markdown' });
 });
 
-// Khởi tạo và chạy bot
 async function startBot() {
     await initDB();
 
@@ -518,5 +514,5 @@ bot.catch((err, ctx) => {
 });
 
 startBot();
-// Export app for testing or external use
+// Export the app for testing or other purposes
 module.exports = app;
