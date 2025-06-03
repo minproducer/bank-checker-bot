@@ -40,7 +40,7 @@ function generateCaptcha() {
     const a = Math.floor(Math.random() * 10) + 1;
     const b = Math.floor(Math.random() * 10) + 1;
     return {
-        question: `📢 Vui lòng trả lời: ${a} + ${b} = ?`,
+        question: `🔐 *CAPTCHA VERIFICATION*\n\n🧮 Vui lòng giải phép tính sau:\n\`${a} + ${b} = ?\`\n\n⏰ _Có hiệu lực trong 10 phút_`,
         answer: (a + b).toString()
     };
 }
@@ -117,6 +117,39 @@ async function hasPendingCaptcha(userId) {
     return !!captchaDb.data.captchas[userId];
 }
 
+// Hàm format kết quả đẹp
+function formatBankResult(result, accountNumber) {
+    if (!result || result.length === 0) {
+        return `❌ *KHÔNG TÌM THẤY THÔNG TIN*\n\n🔢 Số tài khoản: \`${accountNumber}\`\n\n_Vui lòng kiểm tra lại số tài khoản_`;
+    }
+
+    if (result[0].includes('❌')) {
+        return `⚠️ *LỖI XẢY RA*\n\n🔢 Số tài khoản: \`${accountNumber}\`\n\n${result[0]}\n\n_Vui lòng thử lại sau ít phút_`;
+    }
+
+    let formatted = `✅ *THÔNG TIN TÀI KHOẢN*\n\n`;
+    formatted += `🔢 *Số tài khoản:* \`${accountNumber}\`\n`;
+
+    // Tên chủ tài khoản
+    if (result[0]) {
+        const name = result[0].replace('✅ ', '');
+        formatted += `👤 *Chủ tài khoản:* \`${name}\`\n\n`;
+    }
+
+    // Danh sách ngân hàng
+    if (result.length > 1) {
+        formatted += `🏦 *Ngân hàng hỗ trợ:*\n`;
+        for (let i = 1; i < result.length; i++) {
+            if (result[i].trim()) {
+                formatted += `• ${result[i]}\n`;
+            }
+        }
+    }
+
+    formatted += `\n⏰ _Kiểm tra lúc: ${new Date().toLocaleString('vi-VN')}_`;
+    return formatted;
+}
+
 // Hàm kiểm tra tài khoản ngân hàng
 async function checkBankAccount(accountNumber) {
     const browser = await getBrowser();
@@ -155,43 +188,107 @@ async function checkBankAccount(accountNumber) {
 
 // Lấy IP từ Telegram webhook (nếu có)
 function getIP(ctx) {
-    // Nếu dùng webhook, ctx.update.message.from.id là user, ctx.request.ip là IP
     return ctx?.request?.ip || 'unknown';
 }
 
 // Bot logic
-bot.start((ctx) => ctx.reply('Gửi số tài khoản ngân hàng để kiểm tra tên người nhận.'));
+bot.start((ctx) => {
+    const welcomeMsg = `🏦 *BANK ACCOUNT CHECKER*\n\n` +
+        `👋 Chào mừng bạn đến với bot kiểm tra tài khoản ngân hàng!\n\n` +
+        `📝 *Cách sử dụng:*\n` +
+        `• Gửi số tài khoản ngân hàng (9-14 chữ số)\n` +
+        `• Bot sẽ trả về tên chủ tài khoản và ngân hàng\n\n` +
+        `⚡ *Giới hạn:* 10 lượt kiểm tra/ngày\n\n` +
+        `🔧 *Lệnh hỗ trợ:*\n` +
+        `• /checklimit - Xem số lượt còn lại\n` +
+        `• /help - Hướng dẫn chi tiết\n\n` +
+        `_Hãy gửi số tài khoản để bắt đầu!_`;
+
+    ctx.reply(welcomeMsg, { parse_mode: 'Markdown' });
+});
+
+bot.command('help', (ctx) => {
+    const helpMsg = `📖 *HƯỚNG DẪN SỬ DỤNG*\n\n` +
+        `🔍 *Kiểm tra tài khoản:*\n` +
+        `• Gửi số tài khoản từ 9-14 chữ số\n` +
+        `• Ví dụ: \`1234567890\`\n\n` +
+        `📊 *Giới hạn sử dụng:*\n` +
+        `• Mỗi user: 10 lượt/ngày\n` +
+        `• Mỗi IP: 20 lượt/ngày\n\n` +
+        `🔐 *Bảo mật:*\n` +
+        `• Khi vượt giới hạn, cần xác thực Captcha\n` +
+        `• Dữ liệu không được lưu trữ lâu dài\n\n` +
+        `⚡ *Lệnh hữu ích:*\n` +
+        `• /checklimit - Xem lượt còn lại\n` +
+        `• /start - Khởi động lại bot\n\n` +
+        `❓ *Cần hỗ trợ?* Liên hệ admin.`;
+
+    ctx.reply(helpMsg, { parse_mode: 'Markdown' });
+});
 
 bot.hears(/^[0-9]{9,14}$/, async (ctx) => {
     const userId = ctx.from.id.toString();
-    const ip = ctx?.update?.message?.via_bot ? 'unknown' : (ctx?.ip || ctx?.request?.ip || 'unknown');
+    const ip = getIP(ctx);
     const acc = ctx.message.text;
 
     // Nếu user đang có Captcha chờ xác thực
     if (await hasPendingCaptcha(userId)) {
-        ctx.reply('🚫 Bạn cần trả lời Captcha trước khi tiếp tục.');
+        const pendingMsg = `🚫 *CAPTCHA ĐANG CHỜ XÁC THỰC*\n\n` +
+            `⚠️ Bạn cần trả lời Captcha trước khi tiếp tục kiểm tra tài khoản.\n\n` +
+            `_Vui lòng nhập đáp án của phép tính đã gửi trước đó._`;
+        ctx.reply(pendingMsg, { parse_mode: 'Markdown' });
         return;
     }
 
     // Chống spam IP
     if (!(await canCheckIP(ip))) {
         const question = await setUserCaptcha(userId);
-        ctx.reply('🔒 IP của bạn đã vượt quá giới hạn 20 lần/ngày.\n' + question + '\nGửi đáp án để tiếp tục.');
+        const ipLimitMsg = `🚨 *GIỚI HẠN IP*\n\n` +
+            `⛔ IP của bạn đã vượt quá 20 lần kiểm tra trong ngày.\n\n` +
+            question + `\n\n` +
+            `💡 _Gửi đáp án để tiếp tục sử dụng dịch vụ._`;
+        ctx.reply(ipLimitMsg, { parse_mode: 'Markdown' });
         return;
     }
 
     // Giới hạn lượt user
     if (!(await canCheckToday(userId))) {
         const question = await setUserCaptcha(userId);
-        ctx.reply('🚫 Bạn đã hết 10 lượt kiểm tra hôm nay.\n' + question + '\nGửi đáp án để tiếp tục.');
+        const userLimitMsg = `📊 *HẾT LƯỢT KIỂM TRA*\n\n` +
+            `⏰ Bạn đã sử dụng hết 10 lượt kiểm tra trong ngày.\n\n` +
+            question + `\n\n` +
+            `🔄 _Lượt kiểm tra sẽ được reset vào 00:00 hàng ngày._`;
+        ctx.reply(userLimitMsg, { parse_mode: 'Markdown' });
         return;
     }
 
+    // Thông báo đang xử lý
     ctx.replyWithChatAction('typing');
+    const processingMsg = `🔍 *ĐANG KIỂM TRA...*\n\n` +
+        `🔢 Số tài khoản: \`${acc}\`\n\n` +
+        `⏳ _Vui lòng đợi trong giây lát..._`;
+    const processingMessage = await ctx.reply(processingMsg, { parse_mode: 'Markdown' });
+
+    // Thực hiện kiểm tra
     const result = await checkBankAccount(acc);
-    await ctx.reply(result.join('\n\n'));
+    const formattedResult = formatBankResult(result, acc);
+
+    // Xóa thông báo đang xử lý và gửi kết quả
+    try {
+        await ctx.deleteMessage(processingMessage.message_id);
+    } catch (e) { }
+
+    await ctx.reply(formattedResult, { parse_mode: 'Markdown' });
+
+    // Ghi nhận lượt check và hiển thị lượt còn lại
     await recordCheck(userId);
     await recordCheckIP(ip);
+
+    const remaining = await remainingChecks(userId);
+    const remainingMsg = `📈 *Bạn còn ${remaining}/10 lượt kiểm tra hôm nay*`;
+    setTimeout(() => {
+        ctx.reply(remainingMsg, { parse_mode: 'Markdown' });
+    }, 1000);
 });
 
 bot.on('text', async (ctx) => {
@@ -199,16 +296,61 @@ bot.on('text', async (ctx) => {
     if (await hasPendingCaptcha(userId)) {
         const ok = await checkUserCaptcha(userId, ctx.message.text);
         if (ok) {
-            ctx.reply('✅ Xác thực Captcha thành công! Bạn có thể kiểm tra tiếp.');
+            const successMsg = `✅ *CAPTCHA THÀNH CÔNG*\n\n` +
+                `🎉 Xác thực hoàn tất! Bạn có thể tiếp tục kiểm tra tài khoản.\n\n` +
+                `_Hãy gửi số tài khoản để bắt đầu._`;
+            ctx.reply(successMsg, { parse_mode: 'Markdown' });
         } else {
-            ctx.reply('❌ Captcha sai hoặc đã hết hạn. Gửi lại số tài khoản hoặc /start để nhận Captcha mới.');
+            const failMsg = `❌ *CAPTCHA THẤT BẠI*\n\n` +
+                `⚠️ Đáp án không chính xác hoặc đã hết hạn.\n\n` +
+                `🔄 _Gửi lại số tài khoản để nhận Captcha mới._`;
+            ctx.reply(failMsg, { parse_mode: 'Markdown' });
         }
+    } else {
+        const invalidMsg = `❓ *LỆNH KHÔNG HỢP LỆ*\n\n` +
+            `📝 Vui lòng gửi số tài khoản ngân hàng (9-14 chữ số)\n\n` +
+            `💡 _Hoặc sử dụng /help để xem hướng dẫn._`;
+        ctx.reply(invalidMsg, { parse_mode: 'Markdown' });
     }
 });
 
 bot.command('checklimit', async (ctx) => {
     const left = await remainingChecks(ctx.from.id.toString());
-    ctx.reply(`🔢 Bạn còn ${left} lượt kiểm tra trong hôm nay.`);
+    const today = new Date().toLocaleDateString('vi-VN');
+
+    const limitMsg = `📊 *THỐNG KÊ SỬ DỤNG*\n\n` +
+        `📅 Ngày: ${today}\n` +
+        `🔢 Lượt còn lại: *${left}/10*\n\n` +
+        `${left > 5 ? '🟢' : left > 2 ? '🟡' : '🔴'} _${left > 5 ? 'Còn nhiều lượt' : left > 0 ? 'Sắp hết lượt' : 'Đã hết lượt'}_\n\n` +
+        `🔄 _Reset vào 00:00 hàng ngày_`;
+
+    ctx.reply(limitMsg, { parse_mode: 'Markdown' });
+});
+
+// Stats cho admin
+bot.command('stats', async (ctx) => {
+    if (ctx.from.id.toString() !== process.env.ADMIN_ID) return;
+
+    await db.read();
+    const users = Object.keys(db.data.users).length;
+    let totalChecks = 0;
+    let todayChecks = 0;
+    const today = new Date().toISOString().slice(0, 10);
+
+    for (const user of Object.values(db.data.users)) {
+        for (const [date, count] of Object.entries(user.checks)) {
+            totalChecks += count;
+            if (date === today) todayChecks += count;
+        }
+    }
+
+    const statsMsg = `📈 *THỐNG KÊ HỆ THỐNG*\n\n` +
+        `👥 Tổng số user: *${users}*\n` +
+        `🔢 Tổng lượt check: *${totalChecks}*\n` +
+        `📅 Hôm nay: *${todayChecks}*\n\n` +
+        `⏰ _Cập nhật: ${new Date().toLocaleString('vi-VN')}_`;
+
+    ctx.reply(statsMsg, { parse_mode: 'Markdown' });
 });
 
 // Đăng ký webhook và route xử lý
@@ -216,7 +358,20 @@ bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/telegram`);
 app.use(bot.webhookCallback('/telegram'));
 
 app.get('/', (req, res) => {
-    res.send('Bot is running.');
+    res.send(`
+    <h1>🏦 Bank Account Checker Bot</h1>
+    <p>✅ Bot is running successfully!</p>
+    <p>📊 Status: Active</p>
+    <p>⏰ Last check: ${new Date().toLocaleString('vi-VN')}</p>
+  `);
+});
+
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'healthy',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime()
+    });
 });
 
 const PORT = process.env.PORT || 3000;
@@ -228,4 +383,13 @@ app.listen(PORT, () => {
 process.on('SIGINT', async () => {
     if (browser) await browser.close();
     process.exit();
+});
+
+// Xử lý lỗi chung
+bot.catch((err, ctx) => {
+    console.error('Bot error:', err);
+    const errorMsg = `⚠️ *LỖI HỆ THỐNG*\n\n` +
+        `🔧 Bot đang gặp sự cố tạm thời.\n\n` +
+        `_Vui lòng thử lại sau ít phút._`;
+    ctx.reply(errorMsg, { parse_mode: 'Markdown' }).catch(() => { });
 });
