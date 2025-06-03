@@ -278,12 +278,17 @@ function formatBankResult(result, accountNumber) {
     return formatted;
 }
 
+// FIX: Cải thiện timeout và error handling cho checkBankAccount
 async function checkBankAccount(accountNumber) {
     const browser = await getBrowser();
     const page = await browser.newPage();
 
     try {
         console.log(`[${new Date().toISOString()}] Checking account: ${accountNumber}`);
+
+        // FIX: Tăng timeout cho page
+        await page.setDefaultNavigationTimeout(60000); // 60s
+        await page.setDefaultTimeout(60000); // 60s
 
         // Thêm headers để giả lập browser Việt Nam
         await page.setExtraHTTPHeaders({
@@ -293,29 +298,31 @@ async function checkBankAccount(accountNumber) {
         });
 
         // Thêm delay ngẫu nhiên để tránh detection
-        await new Promise(resolve => setTimeout(resolve, Math.random() * 2000 + 1000));
+        await new Promise(resolve => setTimeout(resolve, Math.random() * 3000 + 2000));
 
         await page.goto('https://muabanpm.com', {
             waitUntil: 'domcontentloaded',
-            timeout: 30000
+            timeout: 60000
         });
 
-        await page.waitForSelector('#input-from', { timeout: 15000 });
+        // FIX: Tăng timeout cho waitForSelector
+        await page.waitForSelector('#input-from', { timeout: 30000 });
 
         // Thêm delay khi type để giả lập human
-        await page.type('#input-from', accountNumber, { delay: 100 + Math.random() * 50 });
+        await page.type('#input-from', accountNumber, { delay: 150 + Math.random() * 100 });
         await page.keyboard.press('Tab');
 
         // Thêm delay trước khi check kết quả
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        await new Promise(resolve => setTimeout(resolve, 3000));
 
+        // FIX: Cải thiện waitForFunction với timeout cao hơn
         await page.waitForFunction(
             () => {
                 const el = document.querySelector('#addon-from');
                 const text = el?.innerText?.trim();
                 return text && text !== 'Loading...' && text.length > 3;
             },
-            { timeout: 15000 }
+            { timeout: 30000 }
         );
 
         const result = await page.evaluate(() => {
@@ -341,6 +348,11 @@ async function checkBankAccount(accountNumber) {
     } catch (err) {
         console.error(`[${new Date().toISOString()}] Account check error: ${accountNumber}`, err.message);
         await page.close();
+
+        // FIX: Trả về message lỗi chi tiết hơn
+        if (err.message.includes('timeout') || err.message.includes('Waiting failed')) {
+            return [`❌ Website đang chậm hoặc không phản hồi. Vui lòng thử lại sau.`];
+        }
         return [`❌ Lỗi: ${err.message}`];
     }
 }
@@ -502,7 +514,7 @@ bot.hears(/^[0-9]{9,14}$/, async (ctx) => {
     ctx.replyWithChatAction('typing');
     const processingMsg = `🔍 *ĐANG KIỂM TRA...*\n\n` +
         `🔢 Số tài khoản: \`${acc}\`\n\n` +
-        `⏳ _Vui lòng đợi trong giây lát..._`;
+        `⏳ _Vui lòng đợi trong giây lát (có thể mất 30-60s)..._`;
     const processingMessage = await ctx.reply(processingMsg, { parse_mode: 'Markdown' });
 
     const result = await checkBankAccount(acc);
