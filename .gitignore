@@ -1,0 +1,15 @@
+# Không push node_modules
+node_modules/
+
+# Không push file cấu hình môi trường
+.env
+
+# Không push file log hoặc cache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Không push file dữ liệu runtime
+history.json
+# Không push file cấu hình IDE
+.idea/
