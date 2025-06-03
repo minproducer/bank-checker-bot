@@ -348,22 +348,39 @@ async function checkBankAccount(accountNumber) {
     try {
         console.log(`[${new Date().toISOString()}] Checking account: ${accountNumber}`);
 
-        // FIX: Giảm timeout xuống 20s
-        await page.setDefaultNavigationTimeout(20000);
-        await page.setDefaultTimeout(20000);
+        // FIX: Tăng timeout lên 45s cho môi trường production
+        await page.setDefaultNavigationTimeout(45000);
+        await page.setDefaultTimeout(45000);
 
         await page.setExtraHTTPHeaders({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
         });
 
-        await new Promise(resolve => setTimeout(resolve, Math.random() * 2000 + 1000));
+        // FIX: Tăng delay để tránh bị block
+        await new Promise(resolve => setTimeout(resolve, Math.random() * 5000 + 3000)); // 3-8s
 
+        console.log(`[${new Date().toISOString()}] Navigating to muabanpm.com`);
         await page.goto('https://muabanpm.com', {
-            waitUntil: 'domcontentloaded',
-            timeout: 20000
+            waitUntil: 'networkidle2', // Đợi network idle thay vì domcontentloaded
+            timeout: 45000
         });
+
+        console.log(`[${new Date().toISOString()}] Page loaded, looking for tabs`);
+
+        // FIX: Kiểm tra tab có tồn tại trước khi click
+        const tabExists = await page.evaluate(() => {
+            const tabs = Array.from(document.querySelectorAll('.tab .item'));
+            const buyTab = tabs.find(tab => tab.innerText.includes('Mua USDT'));
+            return !!buyTab;
+        });
+
+        if (!tabExists) {
+            throw new Error('Không tìm thấy tab Mua USDT - giao diện có thể đã thay đổi');
+        }
 
         // Click vào tab "Mua USDT"
         await page.evaluate(() => {
@@ -372,41 +389,76 @@ async function checkBankAccount(accountNumber) {
             if (buyTab) {
                 buyTab.click();
                 console.log('Clicked Mua USDT tab');
-            } else {
-                throw new Error('Không tìm thấy tab Mua USDT');
             }
         });
 
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        console.log(`[${new Date().toISOString()}] Clicked tab, waiting for form`);
+        await new Promise(resolve => setTimeout(resolve, 3000)); // Tăng delay
 
-        // FIX: Giảm timeout selector xuống 15s
-        await page.waitForSelector('#input-from', { timeout: 15000 });
+        // FIX: Tăng timeout cho selector
+        await page.waitForSelector('#input-from', {
+            timeout: 30000,
+            visible: true
+        });
 
-        await page.type('#input-from', accountNumber, { delay: 100 + Math.random() * 50 });
+        console.log(`[${new Date().toISOString()}] Input field found, typing account number`);
+
+        // FIX: Clear input trước khi type
+        await page.click('#input-from', { clickCount: 3 }); // Select all
+        await page.type('#input-from', accountNumber, { delay: 150 + Math.random() * 100 });
+
+        // FIX: Thêm nhiều cách trigger event
         await page.keyboard.press('Tab');
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await page.evaluate(() => {
+            const input = document.querySelector('#input-from');
+            if (input) {
+                input.blur();
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        });
 
-        // FIX: Giảm timeout waitForFunction xuống 15s
+        console.log(`[${new Date().toISOString()}] Waiting for account name to load`);
+        await new Promise(resolve => setTimeout(resolve, 4000)); // Tăng delay
+
+        // FIX: Tăng timeout và cải thiện logic check
         await page.waitForFunction(
             () => {
                 const el = document.querySelector('#addon-from');
-                const text = el?.innerText?.trim();
-                return text && text !== 'Loading...' && text.length > 3;
+                if (!el) return false;
+
+                const text = el.innerText?.trim();
+                console.log('Current text:', text);
+
+                return text &&
+                    text !== 'Loading...' &&
+                    text !== '' &&
+                    text !== '-' &&
+                    text.length > 2 &&
+                    !text.toLowerCase().includes('loading');
             },
-            { timeout: 15000 }
+            {
+                timeout: 35000,
+                polling: 1000 // Check mỗi 1s
+            }
         );
 
-        // FIX: Thêm logic kiểm tra chi tiết kết quả
+        console.log(`[${new Date().toISOString()}] Account name loaded, extracting data`);
+
+        // FIX: Cải thiện logic extract data
         const result = await page.evaluate(() => {
             const data = [];
             const nameEl = document.querySelector('#addon-from');
             const name = nameEl?.innerText?.trim();
+
+            console.log('Extracted name:', name);
 
             // Kiểm tra các trường hợp không tìm thấy
             if (!name ||
                 name.toLowerCase().includes('loading') ||
                 name.toLowerCase().includes('không tìm thấy') ||
                 name.toLowerCase().includes('not found') ||
+                name.toLowerCase().includes('error') ||
                 name === '' ||
                 name === '-' ||
                 name.length < 3) {
@@ -415,56 +467,75 @@ async function checkBankAccount(accountNumber) {
 
             data.push('✅ ' + name);
 
-            // Lấy danh sách ngân hàng
-            const bankElements = document.querySelectorAll('#pay-from .pay');
-            if (bankElements.length > 0) {
-                bankElements.forEach(el => {
-                    const text = el.textContent?.trim();
-                    if (text && text !== '' && text !== '-') {
-                        data.push(text);
-                    }
-                });
+            // Lấy danh sách ngân hàng với retry
+            try {
+                const bankElements = document.querySelectorAll('#pay-from .pay');
+                console.log('Found bank elements:', bankElements.length);
+
+                if (bankElements.length > 0) {
+                    bankElements.forEach(el => {
+                        const text = el.textContent?.trim();
+                        if (text && text !== '' && text !== '-' && text.length > 1) {
+                            data.push(text);
+                        }
+                    });
+                }
+            } catch (bankError) {
+                console.log('Error getting banks:', bankError);
             }
 
             return data;
         });
 
-        // FIX: Kiểm tra kết quả trả về
+        // FIX: Validate kết quả
         if (!result || result.length === 0) {
             console.log(`[${new Date().toISOString()}] No result returned for: ${accountNumber}`);
             await page.close();
             return ['❌ Không tìm thấy thông tin tài khoản'];
         }
 
-        // Kiểm tra nếu chỉ có thông báo lỗi
         if (result.length === 1 && result[0].includes('❌')) {
             console.log(`[${new Date().toISOString()}] Account not found: ${accountNumber}`);
             await page.close();
             return result;
         }
 
-        console.log(`[${new Date().toISOString()}] Account check success: ${accountNumber}`);
+        console.log(`[${new Date().toISOString()}] Account check success: ${accountNumber}`, result);
         await page.close();
         return result;
 
     } catch (err) {
         console.error(`[${new Date().toISOString()}] Account check error: ${accountNumber}`, err.message);
+        console.error('Full error:', err);
 
-        // Chụp screenshot khi lỗi
-        const screenshotPath = await captureErrorScreenshot(page, accountNumber, err);
+        // FIX: Chụp screenshot với thông tin chi tiết hơn
+        let screenshotPath = null;
+        try {
+            screenshotPath = await captureErrorScreenshot(page, accountNumber, err);
+        } catch (screenshotError) {
+            console.error('Screenshot error:', screenshotError);
+        }
 
         await page.close();
 
-        // FIX: Phân loại lỗi rõ ràng hơn
+        // FIX: Phân loại lỗi chi tiết hơn
         if (err.message.includes('timeout') || err.message.includes('Waiting failed')) {
-            return [`❌ Hệ thống quá tải, vui lòng thử lại sau.`, screenshotPath];
+            return [`❌ Trang web phản hồi chậm, vui lòng thử lại sau 1-2 phút.`, screenshotPath];
+        }
+        if (err.message.includes('Navigation timeout')) {
+            return [`❌ Không thể kết nối tới website, vui lòng thử lại sau.`, screenshotPath];
         }
         if (err.message.includes('Không tìm thấy tab')) {
-            return [`❌ Giao diện website đã thay đổi, vui lòng liên hệ admin.`, screenshotPath];
+            return [`❌ Giao diện website đã thay đổi, đang cập nhật bot.`, screenshotPath];
         }
-        return [`❌ Lỗi: ${err.message}`, screenshotPath];
+        if (err.message.includes('net::ERR_')) {
+            return [`❌ Lỗi kết nối mạng, vui lòng thử lại sau.`, screenshotPath];
+        }
+
+        return [`❌ Lỗi hệ thống: ${err.message}`, screenshotPath];
     }
 }
+// FIX: Thêm hàm lấy IP từ context
 
 function getIP(ctx) {
     return ctx?.request?.ip ||
