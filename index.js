@@ -16,7 +16,7 @@ const loadHistory = () => JSON.parse(fs.readFileSync(historyFile));
 const saveHistory = (history) => fs.writeFileSync(historyFile, JSON.stringify(history, null, 2));
 
 async function checkBankAccount(accountNumber) {
-    const browser = await puppeteer.launch({ headless: true });
+    const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
     const page = await browser.newPage();
 
     try {
@@ -71,7 +71,7 @@ function remainingChecks(userId) {
 }
 
 bot.start((ctx) => ctx.reply('Gửi số tài khoản ngân hàng để kiểm tra tên người nhận.'));
-bot.hears(/^\d{9,14}$/, async (ctx) => {
+bot.hears(/^[0-9]{9,14}$/, async (ctx) => {
     const userId = ctx.from.id;
     const acc = ctx.message.text;
     if (!canCheckToday(userId)) {
@@ -89,10 +89,10 @@ bot.command('checklimit', (ctx) => {
     ctx.reply(`🔢 Bạn còn ${left} lượt kiểm tra trong hôm nay.`);
 });
 
+// Đăng ký webhook và route xử lý
+bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/telegram`);
 app.use(bot.webhookCallback('/telegram'));
-// bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/telegram`);
-app.use(bot.webhookCallback('/telegram'));
-// Đặt webhook cho bot
+
 app.get('/', (req, res) => {
     res.send('Bot is running.');
 });
@@ -101,16 +101,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`✅ Server is running on port ${PORT}`);
 });
-
-// 👇 KHỞI ĐỘNG BOT BẰNG POLLING (TẠM THỜI)
-bot.launch();
-console.log('🤖 Bot is running via polling...');
-// server.js
-// app.get('/', (req, res) => {
-//     res.send('Bot is running.');
-// });
-
-// const PORT = process.env.PORT || 3000;
-// app.listen(PORT, () => {
-//     console.log(`✅ Server is running on port ${PORT}`);
-// });
